@@ -41,36 +41,47 @@ export function RightSidebar() {
     }
   }, [user]);
 
-  const loadTrending = async () => {
+  const loadTrending = async (attempt = 0) => {
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
       const res = await fetch(
         `https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/posts/trending`,
-        { headers: { 'Authorization': `Bearer ${publicAnonKey}` } }
+        { headers: { 'Authorization': `Bearer ${publicAnonKey}` }, signal: controller.signal }
       );
+      clearTimeout(timeout);
       if (res.ok) {
         const data = await res.json();
         setTrending(data);
       }
-    } catch (e) {
-      console.error('Error loading trending:', e);
+    } catch (e: any) {
+      if (attempt < 2) {
+        setTimeout(() => loadTrending(attempt + 1), 2000 * (attempt + 1));
+        return;
+      }
+      console.error('Error loading trending:', e?.message || e);
     } finally {
       setLoadingTrending(false);
     }
   };
 
-  const loadSuggestions = async () => {
+  const loadSuggestions = async (attempt = 0) => {
     if (!user) return;
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      const headers = { 'Authorization': `Bearer ${publicAnonKey}` };
       const [usersRes, followingRes] = await Promise.all([
         fetch(
           `https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/users`,
-          { headers: { 'Authorization': `Bearer ${publicAnonKey}` } }
+          { headers, signal: controller.signal }
         ),
         fetch(
           `https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/users/${user.id}/following`,
-          { headers: { 'Authorization': `Bearer ${publicAnonKey}` } }
+          { headers, signal: controller.signal }
         ),
       ]);
+      clearTimeout(timeout);
 
       if (usersRes.ok && followingRes.ok) {
         const allUsers: UserProfile[] = await usersRes.json();
@@ -84,8 +95,12 @@ export function RightSidebar() {
           .slice(0, 8);
         setSuggestions(filtered);
       }
-    } catch (e) {
-      console.error('Error loading suggestions:', e);
+    } catch (e: any) {
+      if (attempt < 2) {
+        setTimeout(() => loadSuggestions(attempt + 1), 2000 * (attempt + 1));
+        return;
+      }
+      console.error('Error loading suggestions:', e?.message || e);
     } finally {
       setLoadingUsers(false);
     }

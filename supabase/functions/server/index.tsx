@@ -692,6 +692,61 @@ app.get("/make-server-e9524f09/posts/search", async (c) => {
   }
 });
 
+// ============ TRENDING TOPICS ENDPOINT — must be before /posts/:postId ============
+
+app.get("/make-server-e9524f09/posts/trending", async (c) => {
+  try {
+    const globalFeed: string[] = await kv.get('global_feed') || [];
+    const recentIds = globalFeed.slice(0, 200);
+
+    const posts = await Promise.all(recentIds.map((id: string) => kv.get(`post:${id}`)));
+
+    const stopWords = new Set([
+      'para', 'com', 'uma', 'que', 'não', 'mais', 'como', 'isso', 'este', 'esta',
+      'esse', 'essa', 'pelo', 'pela', 'pelos', 'pelas', 'numa', 'num', 'mas', 'por',
+      'sem', 'sobre', 'entre', 'todo', 'toda', 'todos', 'todas', 'muito', 'muita',
+      'muitos', 'muitas', 'bem', 'também', 'ainda', 'aqui', 'isto', 'aquilo', 'onde',
+      'quando', 'quem', 'qual', 'quais', 'ser', 'estar', 'ter', 'fazer', 'pode',
+      'vai', 'vou', 'vem', 'são', 'seus', 'suas', 'seu', 'sua', 'nos', 'nas', 'aos',
+      'das', 'dos', 'foi', 'tem', 'era', 'ele', 'ela', 'eles', 'elas', 'você',
+      'voce', 'então', 'entao', 'tudo', 'nada', 'hoje', 'aqui', 'pelo', 'está',
+      'estou', 'essa', 'esse', 'isso', 'numa', 'dele', 'dela', 'deles', 'delas',
+    ]);
+
+    const wordData: Record<string, { count: number; users: Set<string> }> = {};
+
+    for (const post of posts.filter(Boolean)) {
+      if (!post.content) continue;
+      const words = post.content
+        .toLowerCase()
+        .replace(/[^a-záéíóúãõâêîôûàèìòùç\s]/g, ' ')
+        .split(/\s+/)
+        .filter((w: string) => w.length >= 4 && !stopWords.has(w));
+
+      for (const word of words) {
+        if (!wordData[word]) wordData[word] = { count: 0, users: new Set() };
+        wordData[word].count++;
+        wordData[word].users.add(post.userId);
+      }
+    }
+
+    const trending = Object.entries(wordData)
+      .filter(([, d]) => d.count >= 1)
+      .sort((a, b) => b[1].count - a[1].count || b[1].users.size - a[1].users.size)
+      .slice(0, 5)
+      .map(([word, d]) => ({
+        topic: word.charAt(0).toUpperCase() + word.slice(1),
+        count: d.count,
+        userCount: d.users.size,
+      }));
+
+    return c.json(trending);
+  } catch (error) {
+    console.error(`Error getting trending: ${error}`);
+    return c.json({ error: 'Internal server error' }, 500);
+  }
+});
+
 // Get single post by ID
 app.get("/make-server-e9524f09/posts/:postId", async (c) => {
   try {
@@ -1442,60 +1497,7 @@ app.post("/make-server-e9524f09/dm/:partnerId/messages", async (c) => {
   }
 });
 
-// ============ TRENDING TOPICS ENDPOINT ============
-
-app.get("/make-server-e9524f09/posts/trending", async (c) => {
-  try {
-    const globalFeed: string[] = await kv.get('global_feed') || [];
-    const recentIds = globalFeed.slice(0, 200);
-
-    const posts = await Promise.all(recentIds.map((id: string) => kv.get(`post:${id}`)));
-
-    const stopWords = new Set([
-      'para', 'com', 'uma', 'que', 'não', 'mais', 'como', 'isso', 'este', 'esta',
-      'esse', 'essa', 'pelo', 'pela', 'pelos', 'pelas', 'numa', 'num', 'mas', 'por',
-      'sem', 'sobre', 'entre', 'todo', 'toda', 'todos', 'todas', 'muito', 'muita',
-      'muitos', 'muitas', 'bem', 'também', 'ainda', 'aqui', 'isto', 'aquilo', 'onde',
-      'quando', 'quem', 'qual', 'quais', 'ser', 'estar', 'ter', 'fazer', 'pode',
-      'vai', 'vou', 'vem', 'são', 'seus', 'suas', 'seu', 'sua', 'nos', 'nas', 'aos',
-      'das', 'dos', 'foi', 'tem', 'era', 'ele', 'ela', 'eles', 'elas', 'você',
-      'voce', 'então', 'entao', 'tudo', 'nada', 'hoje', 'aqui', 'pelo', 'está',
-      'estou', 'essa', 'esse', 'isso', 'numa', 'dele', 'dela', 'deles', 'delas',
-    ]);
-
-    const wordData: Record<string, { count: number; users: Set<string> }> = {};
-
-    for (const post of posts.filter(Boolean)) {
-      if (!post.content) continue;
-      const words = post.content
-        .toLowerCase()
-        .replace(/[^a-záéíóúãõâêîôûàèìòùç\s]/g, ' ')
-        .split(/\s+/)
-        .filter((w: string) => w.length >= 4 && !stopWords.has(w));
-
-      for (const word of words) {
-        if (!wordData[word]) wordData[word] = { count: 0, users: new Set() };
-        wordData[word].count++;
-        wordData[word].users.add(post.userId);
-      }
-    }
-
-    const trending = Object.entries(wordData)
-      .filter(([_, d]) => d.count >= 1)
-      .sort((a, b) => b[1].count - a[1].count || b[1].users.size - a[1].users.size)
-      .slice(0, 5)
-      .map(([word, d]) => ({
-        topic: word.charAt(0).toUpperCase() + word.slice(1),
-        count: d.count,
-        userCount: d.users.size,
-      }));
-
-    return c.json(trending);
-  } catch (error) {
-    console.error(`Error getting trending: ${error}`);
-    return c.json({ error: 'Internal server error' }, 500);
-  }
-});
+// Note: /posts/trending is defined earlier (before /posts/:postId) to avoid route conflict
 
 // ============ NOTES ENDPOINTS ============
 

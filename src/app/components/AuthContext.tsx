@@ -34,6 +34,7 @@ export interface UserProfile {
   displayName: string;
   firstName: string;
   lastName: string;
+  username?: string;
   bio: string;
   avatar: string;
   banner: string;
@@ -62,18 +63,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const loadUserProfile = async (userId: string) => {
+  const loadUserProfile = async (userId: string, attempt = 0) => {
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
       const res = await fetch(
         `https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/users/${userId}`,
-        { headers: { 'Authorization': `Bearer ${publicAnonKey}` } }
+        { headers: { 'Authorization': `Bearer ${publicAnonKey}` }, signal: controller.signal }
       );
+      clearTimeout(timeout);
       if (res.ok) {
         const profile = await res.json();
         setUserProfile(profile);
+      } else {
+        console.warn(`User profile fetch returned ${res.status} for ${userId}`);
       }
-    } catch (e) {
-      console.error('Error loading user profile:', e);
+    } catch (e: any) {
+      if (attempt < 2) {
+        // Retry after short delay (handles Edge Function cold-start)
+        setTimeout(() => loadUserProfile(userId, attempt + 1), 2000 * (attempt + 1));
+      } else {
+        console.error('Error loading user profile after retries:', e?.message || e);
+      }
     }
   };
 
