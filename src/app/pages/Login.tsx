@@ -36,10 +36,14 @@ export function Login() {
       return;
     }
 
-    const nameParts = fullName.trim().split(' ').filter(Boolean);
-    if (nameParts.length < 2) {
-      toast.error('Por favor, digite seu nome e sobrenome');
-      return;
+    const isUsername = fullName.trim().startsWith('@') || !fullName.trim().includes(' ');
+
+    if (!isUsername) {
+      const nameParts = fullName.trim().split(' ').filter(Boolean);
+      if (nameParts.length < 2) {
+        toast.error('Por favor, digite seu nome e sobrenome (ou use @usuario / usuario)');
+        return;
+      }
     }
 
     setLoading(true);
@@ -48,7 +52,11 @@ export function Login() {
       toast.success('Bem-vindo ao Nexus! 🚀');
       navigate('/');
     } catch (error: any) {
-      toast.error('Nome ou CPF inválidos. Verifique os dados e tente novamente.');
+      if (isUsername) {
+        toast.error('Usuário não encontrado ou CPF incorreto.');
+      } else {
+        toast.error('Nome ou CPF inválidos. Verifique os dados e tente novamente.');
+      }
     } finally {
       setLoading(false);
     }
@@ -133,13 +141,13 @@ export function Login() {
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>
                 <label className="block text-xs font-semibold text-purple-300/80 mb-2 uppercase tracking-wider">
-                  Nome Completo
+                  Nome Completo ou @usuário
                 </label>
                 <input
                   type="text"
                   value={fullName}
                   onChange={(e) => setFullName(e.target.value)}
-                  placeholder="Seu nome completo"
+                  placeholder="Seu nome completo ou @usuario"
                   autoComplete="name"
                   disabled={loading}
                   className="w-full px-4 py-3.5 rounded-xl border text-foreground placeholder:text-muted-foreground/50 focus:outline-none transition-all text-sm disabled:opacity-50"

@@ -9,6 +9,7 @@ import { Chat } from "./pages/Chat";
 import { Notifications } from "./pages/Notifications";
 import { Notes } from "./pages/Notes";
 import { PostDetail } from "./pages/PostDetail";
+import { Explore } from "./pages/Explore";
 
 // Root wrapper — AuthProvider must live inside the router tree so React Router's
 // rendering context can access it in all route components.
@@ -34,6 +35,7 @@ export const router = createBrowserRouter([
         Component: MainLayout,
         children: [
           { index: true, Component: Feed },
+          { path: "explore", Component: Explore },
           { path: "profile/:userId", Component: Profile },
           { path: "notifications", Component: Notifications },
           { path: "chat", Component: Chat },

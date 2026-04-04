@@ -1,9 +1,14 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router';
 import { useAuth } from '../components/AuthContext';
 import { PostCard } from '../components/PostCard';
+import { ImageAdjustModal } from '../components/ImageAdjustModal';
 import { projectId, publicAnonKey } from '/utils/supabase/info';
-import { Loader2, Camera, Edit2, X, Save, CalendarDays, ArrowLeft, UserPlus, UserCheck, MessageSquare } from 'lucide-react';
+import {
+  Loader2, Camera, Edit2, X, Save, CalendarDays,
+  ArrowLeft, UserPlus, UserCheck, MessageSquare,
+  Image as ImageIcon, Heart, MessageCircle, AtSign
+} from 'lucide-react';
 import { toast } from 'sonner';
 import { Link } from 'react-router';
 import { format } from 'date-fns';
@@ -17,6 +22,7 @@ interface UserProfile {
   banner: string;
   firstName: string;
   lastName: string;
+  username?: string;
   createdAt?: string;
 }
 
@@ -26,21 +32,35 @@ interface Post {
   content: string;
   mediaUrls: string[];
   mediaType: 'image' | 'video' | null;
+  isRepost?: boolean;
   likes: string[];
   reposts: string[];
   comments: any[];
   createdAt: string;
   author?: any;
+  quotedPost?: any;
 }
+
+type ProfileTab = 'posts' | 'replies' | 'media';
 
 export function Profile() {
   const { userId } = useParams<{ userId: string }>();
   const { user, userProfile: currentUserProfile, refreshProfile, getAuthHeaders } = useAuth();
   const navigate = useNavigate();
+
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [posts, setPosts] = useState<Post[]>([]);
+  const [replies, setReplies] = useState<Post[]>([]);
+  const [likedPosts, setLikedPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
+  const [tabLoading, setTabLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState<ProfileTab>('posts');
+
   const [uploading, setUploading] = useState<'avatar' | 'banner' | null>(null);
+
+  // Image adjust state
+  const [adjustFile, setAdjustFile] = useState<File | null>(null);
+  const [adjustType, setAdjustType] = useState<'avatar' | 'banner'>('avatar');
 
   // Follow state
   const [isFollowing, setIsFollowing] = useState(false);
@@ -52,6 +72,7 @@ export function Profile() {
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [editedDisplayName, setEditedDisplayName] = useState('');
   const [editedBio, setEditedBio] = useState('');
+  const [editedUsername, setEditedUsername] = useState('');
   const [savingProfile, setSavingProfile] = useState(false);
 
   const avatarInputRef = useRef<HTMLInputElement>(null);
@@ -59,27 +80,18 @@ export function Profile() {
 
   const isOwnProfile = user?.id === userId;
 
-  const loadProfile = async () => {
+  const loadProfile = useCallback(async () => {
     if (!userId) return;
-
     try {
       const [profileRes, postsRes, followersRes, followingRes] = await Promise.all([
-        fetch(
-          `https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/users/${userId}`,
-          { headers: { 'Authorization': `Bearer ${publicAnonKey}` } }
-        ),
-        fetch(
-          `https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/posts/user/${userId}`,
-          { headers: { 'Authorization': `Bearer ${publicAnonKey}` } }
-        ),
-        fetch(
-          `https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/users/${userId}/followers`,
-          { headers: { 'Authorization': `Bearer ${publicAnonKey}` } }
-        ),
-        fetch(
-          `https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/users/${userId}/following`,
-          { headers: { 'Authorization': `Bearer ${publicAnonKey}` } }
-        ),
+        fetch(`https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/users/${userId}`,
+          { headers: { 'Authorization': `Bearer ${publicAnonKey}` } }),
+        fetch(`https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/posts/user/${userId}`,
+          { headers: { 'Authorization': `Bearer ${publicAnonKey}` } }),
+        fetch(`https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/users/${userId}/followers`,
+          { headers: { 'Authorization': `Bearer ${publicAnonKey}` } }),
+        fetch(`https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/users/${userId}/following`,
+          { headers: { 'Authorization': `Bearer ${publicAnonKey}` } }),
       ]);
 
       if (profileRes.ok) {
@@ -87,13 +99,12 @@ export function Profile() {
         setProfile(profileData);
         setEditedDisplayName(profileData.displayName || '');
         setEditedBio(profileData.bio || '');
+        setEditedUsername(profileData.username || '');
       }
-
       if (postsRes.ok) {
         const postsData = await postsRes.json();
-        setPosts(postsData);
+        setPosts(postsData.filter((p: Post) => !p.isRepost));
       }
-
       if (followersRes.ok) {
         const followersData = await followersRes.json();
         setFollowersCount(followersData.count || 0);
@@ -101,7 +112,6 @@ export function Profile() {
           setIsFollowing(followersData.followers?.includes(user.id) || false);
         }
       }
-
       if (followingRes.ok) {
         const followingData = await followingRes.json();
         setFollowingCount(followingData.count || 0);
@@ -112,18 +122,41 @@ export function Profile() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [userId, user, isOwnProfile]);
 
-  useEffect(() => {
-    loadProfile();
-  }, [userId]);
+  useEffect(() => { loadProfile(); }, [loadProfile]);
 
-  // Sync with currentUserProfile if viewing own profile
   useEffect(() => {
     if (isOwnProfile && currentUserProfile) {
       setProfile(currentUserProfile as UserProfile);
     }
   }, [currentUserProfile, isOwnProfile]);
+
+  // Load tab data on demand
+  const loadTabData = useCallback(async (tab: ProfileTab) => {
+    if (!userId) return;
+    if (tab === 'posts') return; // already loaded
+
+    setTabLoading(true);
+    try {
+      if (tab === 'replies') {
+        const res = await fetch(
+          `https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/posts/user/${userId}/replies`,
+          { headers: { 'Authorization': `Bearer ${publicAnonKey}` } }
+        );
+        if (res.ok) setReplies(await res.json());
+      }
+    } catch (e) {
+      console.error(`Error loading tab ${tab}:`, e);
+    } finally {
+      setTabLoading(false);
+    }
+  }, [userId]);
+
+  const handleTabChange = (tab: ProfileTab) => {
+    setActiveTab(tab);
+    loadTabData(tab);
+  };
 
   const handleFollow = async () => {
     if (!user || !userId) return;
@@ -139,8 +172,6 @@ export function Profile() {
         setIsFollowing(data.following);
         setFollowersCount(data.followersCount);
         toast.success(data.following ? '✅ Seguindo!' : 'Deixou de seguir');
-      } else {
-        toast.error('Erro ao seguir/deixar de seguir');
       }
     } catch (e) {
       toast.error('Erro ao seguir');
@@ -149,126 +180,91 @@ export function Profile() {
     }
   };
 
-  const handleUploadMedia = async (file: File, type: 'avatar' | 'banner') => {
-    // Validate file type
-    if (!file.type.startsWith('image/')) {
-      toast.error('Por favor, selecione uma imagem');
-      return;
-    }
-
-    // Validate file size (max 10MB)
-    if (file.size > 10 * 1024 * 1024) {
-      toast.error('Imagem muito grande. Máximo de 10 MB');
-      return;
-    }
-
-    // Get fresh auth headers — anon key for gateway, user JWT for Hono auth
+  // Triggered after image adjustment — upload the cropped blob
+  const handleAdjustedImage = async (blob: Blob) => {
+    setAdjustFile(null);
+    const type = adjustType;
     const authHeaders = await getAuthHeaders();
     if (!authHeaders['X-User-Token']) return;
 
     setUploading(type);
-
     try {
-      // 1. Request a signed upload URL from the server
+      const ext = 'jpg';
+      const filename = `${type}_${Date.now()}.${ext}`;
+
       const signRes = await fetch(
         `https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/upload/sign`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders },
-          body: JSON.stringify({
-            filename: file.name,
-            contentType: file.type,
-            fileSize: file.size,
-          }),
+          body: JSON.stringify({ filename, contentType: 'image/jpeg', fileSize: blob.size }),
         }
       );
-
-      if (!signRes.ok) {
-        const err = await signRes.json().catch(() => ({}));
-        throw new Error(err.error || 'Falha ao obter URL de upload');
-      }
+      if (!signRes.ok) throw new Error('Falha ao obter URL de upload');
 
       const { signedUrl, publicUrl, contentType } = await signRes.json();
-
-      // 2. PUT the file directly to Supabase Storage — no edge-function memory used
       const uploadRes = await fetch(signedUrl, {
         method: 'PUT',
-        headers: { 'Content-Type': contentType || file.type },
-        body: file,
+        headers: { 'Content-Type': contentType || 'image/jpeg' },
+        body: blob,
       });
-
-      if (!uploadRes.ok) {
-        throw new Error(`Falha ao enviar arquivo: ${uploadRes.status} ${uploadRes.statusText}`);
-      }
-
-      const url = publicUrl as string;
+      if (!uploadRes.ok) throw new Error('Falha ao enviar arquivo');
 
       const updateRes = await fetch(
         `https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/users/${userId}`,
         {
           method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            ...authHeaders,
-          },
-          body: JSON.stringify({ [type]: url }),
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
+          body: JSON.stringify({ [type]: publicUrl }),
         }
       );
-
-      if (!updateRes.ok) {
-        throw new Error('Falha ao atualizar perfil');
-      }
+      if (!updateRes.ok) throw new Error('Falha ao atualizar perfil');
 
       const updatedProfile = await updateRes.json();
       setProfile(updatedProfile);
       if (isOwnProfile) await refreshProfile();
-
       toast.success(type === 'avatar' ? '📸 Foto de perfil atualizada!' : '🖼️ Foto de capa atualizada!');
     } catch (error: any) {
-      console.error('Upload error:', error);
       toast.error(error.message || 'Erro ao fazer upload');
     } finally {
       setUploading(null);
     }
   };
 
+  // When user picks a file, open the adjust modal
+  const handleFileSelected = (file: File, type: 'avatar' | 'banner') => {
+    if (!file.type.startsWith('image/')) { toast.error('Por favor, selecione uma imagem'); return; }
+    if (file.size > 10 * 1024 * 1024) { toast.error('Imagem muito grande. Máximo de 10 MB'); return; }
+    setAdjustType(type);
+    setAdjustFile(file);
+  };
+
   const handleSaveProfile = async () => {
     if (!userId) return;
-    if (!editedDisplayName.trim()) {
-      toast.error('O nome de exibição não pode estar vazio');
-      return;
-    }
+    if (!editedDisplayName.trim()) { toast.error('O nome de exibição não pode estar vazio'); return; }
 
-    // Get fresh auth headers — anon key for gateway, user JWT for Hono auth
     const authHeaders = await getAuthHeaders();
     if (!authHeaders['X-User-Token']) return;
 
     setSavingProfile(true);
-
     try {
       const response = await fetch(
         `https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/users/${userId}`,
         {
           method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            ...authHeaders,
-          },
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
           body: JSON.stringify({
             displayName: editedDisplayName.trim(),
             bio: editedBio.trim(),
+            username: editedUsername.trim().replace(/^@/, '').toLowerCase(),
           }),
         }
       );
-
-      if (!response.ok) {
-        throw new Error('Falha ao atualizar perfil');
-      }
+      if (!response.ok) throw new Error('Falha ao atualizar perfil');
 
       const updatedProfile = await response.json();
       setProfile(updatedProfile);
       if (isOwnProfile) await refreshProfile();
-
       setEditModalOpen(false);
       toast.success('✅ Perfil atualizado!');
     } catch (error: any) {
@@ -282,6 +278,7 @@ export function Profile() {
     if (profile) {
       setEditedDisplayName(profile.displayName || '');
       setEditedBio(profile.bio || '');
+      setEditedUsername(profile.username || '');
       setEditModalOpen(true);
     }
   };
@@ -305,19 +302,35 @@ export function Profile() {
     );
   }
 
-  const initials = profile.displayName
-    .split(' ')
-    .map(n => n[0])
-    .join('')
-    .toUpperCase()
-    .slice(0, 2);
+  const initials = profile.displayName.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
+  const joinedDate = profile.createdAt ? format(new Date(profile.createdAt), "MMMM 'de' yyyy", { locale: ptBR }) : null;
 
-  const joinedDate = profile.createdAt
-    ? format(new Date(profile.createdAt), "MMMM 'de' yyyy", { locale: ptBR })
-    : null;
+  const usernameDisplay = profile.username
+    ? `@${profile.username}`
+    : `@${(profile.firstName || '').toLowerCase()}${(profile.lastName || '').toLowerCase()}`;
+
+  // Media posts (only own posts with media)
+  const mediaPosts = posts.filter(p => p.mediaUrls && p.mediaUrls.length > 0);
+
+  const tabs: { key: ProfileTab; label: string; icon: React.ReactNode }[] = [
+    { key: 'posts', label: 'Posts', icon: <Edit2 className="w-4 h-4" /> },
+    { key: 'replies', label: 'Respostas', icon: <MessageCircle className="w-4 h-4" /> },
+    { key: 'media', label: 'Mídia', icon: <ImageIcon className="w-4 h-4" /> },
+  ];
 
   return (
     <div className="max-w-3xl mx-auto pb-10">
+      {/* Image adjust modal */}
+      {adjustFile && (
+        <ImageAdjustModal
+          file={adjustFile}
+          shape={adjustType === 'avatar' ? 'circle' : 'rect'}
+          aspectRatio={adjustType === 'banner' ? 3 : 1}
+          onConfirm={handleAdjustedImage}
+          onCancel={() => setAdjustFile(null)}
+        />
+      )}
+
       {/* Back button */}
       <div className="flex items-center gap-4 p-4 sticky top-0 bg-background/80 backdrop-blur-md z-10 border-b border-border">
         <Link to="/" className="p-2 hover:bg-muted rounded-full transition-colors">
@@ -330,18 +343,17 @@ export function Profile() {
       </div>
 
       {/* Banner */}
-      <div className="relative h-52 bg-gradient-to-br from-primary via-purple-600 to-secondary overflow-hidden">
+      <div className="relative h-52 bg-gradient-to-br from-primary via-purple-600 to-secondary overflow-hidden group/banner">
         {profile.banner && (
           <img src={profile.banner} alt="Banner" className="w-full h-full object-cover" />
         )}
         {isOwnProfile && (
           <>
-            <div className="absolute inset-0 flex items-center justify-center">
+            <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover/banner:opacity-100 transition-opacity bg-black/30">
               <button
                 onClick={() => bannerInputRef.current?.click()}
                 disabled={!!uploading}
-                className="bg-black/50 hover:bg-black/70 backdrop-blur-sm text-white px-4 py-2 rounded-full flex items-center gap-2 transition-all opacity-0 hover:opacity-100 focus:opacity-100"
-                style={{ opacity: uploading === 'banner' ? 1 : undefined }}
+                className="bg-black/60 hover:bg-black/80 backdrop-blur-sm text-white px-4 py-2 rounded-full flex items-center gap-2 transition-all"
               >
                 {uploading === 'banner' ? <Loader2 className="w-5 h-5 animate-spin" /> : <Camera className="w-5 h-5" />}
                 <span className="text-sm font-medium">{uploading === 'banner' ? 'Enviando...' : 'Alterar capa'}</span>
@@ -361,11 +373,7 @@ export function Profile() {
           ref={bannerInputRef}
           type="file"
           accept="image/*"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) handleUploadMedia(file, 'banner');
-            e.target.value = '';
-          }}
+          onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFileSelected(f, 'banner'); e.target.value = ''; }}
           className="hidden"
         />
       </div>
@@ -374,7 +382,7 @@ export function Profile() {
         {/* Avatar + Action buttons row */}
         <div className="flex items-end justify-between -mt-16 mb-4">
           {/* Avatar */}
-          <div className="relative">
+          <div className="relative group/avatar">
             {profile.avatar ? (
               <img
                 src={profile.avatar}
@@ -390,21 +398,17 @@ export function Profile() {
               <button
                 onClick={() => avatarInputRef.current?.click()}
                 disabled={!!uploading}
-                className="absolute bottom-1 right-1 bg-primary hover:bg-primary/90 disabled:opacity-60 p-2 rounded-full cursor-pointer transition-all shadow-lg border-2 border-background"
+                className="absolute inset-0 rounded-full bg-black/50 opacity-0 group-hover/avatar:opacity-100 flex items-center justify-center transition-all disabled:opacity-60 cursor-pointer"
                 title="Alterar foto de perfil"
               >
-                {uploading === 'avatar' ? <Loader2 className="w-4 h-4 text-white animate-spin" /> : <Camera className="w-4 h-4 text-white" />}
+                {uploading === 'avatar' ? <Loader2 className="w-6 h-6 text-white animate-spin" /> : <Camera className="w-6 h-6 text-white" />}
               </button>
             )}
             <input
               ref={avatarInputRef}
               type="file"
               accept="image/*"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) handleUploadMedia(file, 'avatar');
-                e.target.value = '';
-              }}
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFileSelected(f, 'avatar'); e.target.value = ''; }}
               className="hidden"
             />
           </div>
@@ -438,19 +442,7 @@ export function Profile() {
                       : 'bg-foreground text-background hover:bg-foreground/90'
                   }`}
                 >
-                  {followLoading ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : isFollowing ? (
-                    <>
-                      <UserCheck className="w-4 h-4" />
-                      Seguindo
-                    </>
-                  ) : (
-                    <>
-                      <UserPlus className="w-4 h-4" />
-                      Seguir
-                    </>
-                  )}
+                  {followLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : isFollowing ? <><UserCheck className="w-4 h-4" />Seguindo</> : <><UserPlus className="w-4 h-4" />Seguir</>}
                 </button>
               </>
             )}
@@ -458,17 +450,14 @@ export function Profile() {
         </div>
 
         {/* Profile Info */}
-        <div className="mb-6">
+        <div className="mb-4">
           <h2 className="text-2xl font-bold">{profile.displayName}</h2>
-          <p className="text-muted-foreground text-sm mt-0.5">
-            @{profile.firstName?.toLowerCase()}{profile.lastName?.toLowerCase()}
-          </p>
+          <p className="text-muted-foreground text-sm mt-0.5">{usernameDisplay}</p>
 
           {profile.bio && (
             <p className="text-foreground mt-3 leading-relaxed">{profile.bio}</p>
           )}
 
-          {/* Meta info */}
           <div className="flex flex-wrap gap-4 mt-3 text-muted-foreground text-sm">
             {joinedDate && (
               <span className="flex items-center gap-1.5">
@@ -478,7 +467,6 @@ export function Profile() {
             )}
           </div>
 
-          {/* Stats */}
           <div className="flex gap-6 mt-4">
             <div>
               <span className="font-bold">{posts.length}</span>
@@ -496,34 +484,97 @@ export function Profile() {
         </div>
 
         {/* Tabs */}
-        <div className="border-b border-border mb-6">
-          <button className="px-4 py-3 font-semibold text-foreground border-b-2 border-primary -mb-px">
-            Posts
-          </button>
+        <div className="border-b border-border mb-4 flex">
+          {tabs.map(tab => (
+            <button
+              key={tab.key}
+              onClick={() => handleTabChange(tab.key)}
+              className={`flex items-center gap-1.5 px-4 py-3 font-semibold text-sm border-b-2 transition-colors -mb-px ${
+                activeTab === tab.key
+                  ? 'border-primary text-primary'
+                  : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/50'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
 
-        {/* Posts */}
-        {posts.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
-            <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mb-4">
-              <Edit2 className="w-8 h-8 opacity-40" />
-            </div>
-            <p className="text-lg font-medium">Nenhum post ainda</p>
-            {isOwnProfile && (
-              <p className="text-sm mt-1">Compartilhe algo com o mundo!</p>
-            )}
+        {/* Tab Content */}
+        {tabLoading ? (
+          <div className="flex justify-center py-12">
+            <Loader2 className="w-8 h-8 text-primary animate-spin" />
           </div>
         ) : (
-          <div className="space-y-4">
-            {posts.map((post) => (
-              <PostCard
-                key={post.id}
-                post={post}
-                onDelete={loadProfile}
-                onLike={loadProfile}
-              />
-            ))}
-          </div>
+          <>
+            {/* Posts Tab */}
+            {activeTab === 'posts' && (
+              posts.length === 0 ? (
+                <EmptyState icon={<Edit2 className="w-8 h-8 opacity-40" />} text="Nenhum post ainda" sub={isOwnProfile ? 'Compartilhe algo com o mundo!' : undefined} />
+              ) : (
+                <div className="space-y-4">
+                  {posts.map(post => (
+                    <PostCard key={post.id} post={post} onDelete={loadProfile} onLike={loadProfile} />
+                  ))}
+                </div>
+              )
+            )}
+
+            {/* Replies Tab */}
+            {activeTab === 'replies' && (
+              replies.length === 0 ? (
+                <EmptyState icon={<MessageCircle className="w-8 h-8 opacity-40" />} text="Nenhuma resposta ainda" />
+              ) : (
+                <div className="space-y-4">
+                  {replies.map(post => (
+                    <PostCard key={post.id} post={post} onDelete={() => loadTabData('replies')} onLike={() => loadTabData('replies')} />
+                  ))}
+                </div>
+              )
+            )}
+
+            {/* Media Tab */}
+            {activeTab === 'media' && (
+              mediaPosts.length === 0 ? (
+                <EmptyState icon={<ImageIcon className="w-8 h-8 opacity-40" />} text="Nenhuma mídia ainda" />
+              ) : (
+                <div className="grid grid-cols-3 gap-1">
+                  {mediaPosts.map(post => {
+                    const url = post.mediaUrls[0];
+                    const isVideo = post.mediaType === 'video';
+                    return (
+                      <Link
+                        key={post.id}
+                        to={`/post/${post.id}`}
+                        className="relative aspect-square bg-muted rounded-sm overflow-hidden group hover:opacity-90 transition-opacity"
+                      >
+                        {isVideo ? (
+                          <video
+                            src={url}
+                            className="w-full h-full object-cover"
+                            muted
+                            preload="metadata"
+                          />
+                        ) : (
+                          <img src={url} alt="" className="w-full h-full object-cover" />
+                        )}
+                        {isVideo && (
+                          <div className="absolute bottom-1.5 left-1.5 bg-black/70 text-white text-xs px-1.5 py-0.5 rounded font-medium">
+                            ▶
+                          </div>
+                        )}
+                        {post.mediaUrls.length > 1 && (
+                          <div className="absolute top-1.5 right-1.5 bg-black/70 text-white text-[10px] px-1.5 py-0.5 rounded-full font-medium">
+                            +{post.mediaUrls.length - 1}
+                          </div>
+                        )}
+                      </Link>
+                    );
+                  })}
+                </div>
+              )
+            )}
+          </>
         )}
       </div>
 
@@ -531,32 +582,23 @@ export function Profile() {
       {editModalOpen && (
         <div
           className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setEditModalOpen(false);
-          }}
+          onClick={(e) => { if (e.target === e.currentTarget) setEditModalOpen(false); }}
         >
           <div className="bg-card border border-border rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden">
             {/* Modal header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-border">
               <h2 className="text-xl font-bold">Editar perfil</h2>
-              <button
-                onClick={() => setEditModalOpen(false)}
-                className="p-2 hover:bg-muted rounded-full transition-colors"
-              >
+              <button onClick={() => setEditModalOpen(false)} className="p-2 hover:bg-muted rounded-full transition-colors">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             {/* Modal body */}
-            <div className="p-6 space-y-5">
+            <div className="p-6 space-y-5 max-h-[70vh] overflow-y-auto">
               {/* Avatar preview in modal */}
               <div className="flex items-center gap-4">
                 {profile.avatar ? (
-                  <img
-                    src={profile.avatar}
-                    alt={profile.displayName}
-                    className="w-16 h-16 rounded-full object-cover border-2 border-primary/30"
-                  />
+                  <img src={profile.avatar} alt={profile.displayName} className="w-16 h-16 rounded-full object-cover border-2 border-primary/30" />
                 ) : (
                   <div className="w-16 h-16 rounded-full bg-gradient-to-br from-primary to-secondary flex items-center justify-center text-white text-xl font-bold">
                     {initials}
@@ -585,8 +627,26 @@ export function Profile() {
                   placeholder="Seu nome"
                   className="w-full px-4 py-3 bg-input-background border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary transition-all text-foreground"
                 />
-                <p className="text-xs text-muted-foreground mt-1 text-right">
-                  {editedDisplayName.length}/50
+                <p className="text-xs text-muted-foreground mt-1 text-right">{editedDisplayName.length}/50</p>
+              </div>
+
+              {/* Username */}
+              <div>
+                <label className="block text-sm font-semibold text-muted-foreground mb-1.5">
+                  Nome de usuário (@)
+                </label>
+                <div className="relative">
+                  <AtSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                  <input
+                    value={editedUsername}
+                    onChange={(e) => setEditedUsername(e.target.value.replace(/[^a-zA-Z0-9_]/g, '').toLowerCase())}
+                    maxLength={30}
+                    placeholder={`${(profile.firstName || '').toLowerCase()}${(profile.lastName || '').toLowerCase()}`}
+                    className="w-full pl-9 pr-4 py-3 bg-input-background border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary transition-all text-foreground"
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Apenas letras, números e _ · {editedUsername.length}/30
                 </p>
               </div>
 
@@ -603,9 +663,7 @@ export function Profile() {
                   className="w-full px-4 py-3 bg-input-background border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary transition-all resize-none text-foreground"
                   rows={4}
                 />
-                <p className="text-xs text-muted-foreground mt-1 text-right">
-                  {editedBio.length}/160
-                </p>
+                <p className="text-xs text-muted-foreground mt-1 text-right">{editedBio.length}/160</p>
               </div>
             </div>
 
@@ -630,6 +688,18 @@ export function Profile() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function EmptyState({ icon, text, sub }: { icon: React.ReactNode; text: string; sub?: string }) {
+  return (
+    <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
+      <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mb-4">
+        {icon}
+      </div>
+      <p className="text-lg font-medium">{text}</p>
+      {sub && <p className="text-sm mt-1">{sub}</p>}
     </div>
   );
 }

@@ -1,7 +1,7 @@
 import { Outlet, useNavigate, Link, useLocation } from 'react-router';
 import { useAuth } from './AuthContext';
 import { useEffect, useState, useRef } from 'react';
-import { Home, User, LogOut, Bell, MessageSquare, MessageCircleMore, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Home, User, LogOut, Bell, MessageSquare, MessageCircleMore, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import nexusLogo from 'figma:asset/b9fc9ba1c54f0166784e3d5c5adc4d2864a4bfba.png';
 import { projectId } from '/utils/supabase/info';
 
@@ -83,6 +83,7 @@ export function MainLayout() {
 
   const navItems = [
     { to: '/', icon: Home, label: 'Página Inicial' },
+    { to: '/explore', icon: Search, label: 'Explorar' },
     {
       to: '/notifications',
       icon: Bell,
@@ -201,7 +202,7 @@ export function MainLayout() {
               <div className="flex-1 min-w-0">
                 <div className="font-semibold text-sm truncate">{displayName}</div>
                 <div className="text-xs text-muted-foreground truncate">
-                  @{(userProfile?.firstName || '').toLowerCase()}{(userProfile?.lastName || '').toLowerCase()}
+                  @{userProfile?.username || `${(userProfile?.firstName || '').toLowerCase()}${(userProfile?.lastName || '').toLowerCase()}`}
                 </div>
               </div>
             )}

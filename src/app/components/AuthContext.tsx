@@ -170,11 +170,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signIn = async (fullName: string, cpf: string) => {
-    const nameParts = fullName.trim().split(' ');
-    const firstName = nameParts[0];
-    const lastName = nameParts.slice(1).join(' ');
-    
-    const email = generateEmail(firstName, lastName);
+    let email: string;
+
+    // Support login with @username or plain username (no spaces = treat as username)
+    const trimmed = fullName.trim();
+    const isUsername = trimmed.startsWith('@') || !trimmed.includes(' ');
+
+    if (isUsername) {
+      // Lookup email by username via backend
+      const lookupRes = await fetch(
+        `https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/auth/lookup-by-username`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${publicAnonKey}`,
+          },
+          body: JSON.stringify({ username: trimmed }),
+        }
+      );
+      const lookupData = await lookupRes.json();
+      if (!lookupRes.ok || !lookupData.email) {
+        throw new Error('Usuário com esse @ não encontrado');
+      }
+      email = lookupData.email;
+    } else {
+      const nameParts = trimmed.split(' ');
+      const firstName = nameParts[0];
+      const lastName = nameParts.slice(1).join(' ');
+      email = generateEmail(firstName, lastName);
+    }
+
     const { data, error } = await supabase.auth.signInWithPassword({
       email,
       password: cpf,

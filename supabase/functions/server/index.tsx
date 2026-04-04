@@ -329,6 +329,31 @@ app.post("/make-server-e9524f09/auth/signin", async (c) => {
   }
 });
 
+// Lookup email by @username (for login with @username)
+app.post("/make-server-e9524f09/auth/lookup-by-username", async (c) => {
+  try {
+    const { username } = await c.req.json();
+    if (!username) return c.json({ error: 'Username is required' }, 400);
+
+    const cleanUsername = username.replace(/^@/, '').toLowerCase();
+
+    const { data: authData, error } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 });
+    if (error) return c.json({ error: 'Failed to lookup user' }, 500);
+
+    for (const u of authData.users) {
+      const profile = await kv.get(`user:${u.id}`);
+      if (profile && profile.username && profile.username.toLowerCase() === cleanUsername) {
+        return c.json({ email: u.email });
+      }
+    }
+
+    return c.json({ error: 'User not found' }, 404);
+  } catch (error) {
+    console.error(`Error in lookup-by-username: ${error}`);
+    return c.json({ error: 'Internal server error' }, 500);
+  }
+});
+
 // Get current session
 app.get("/make-server-e9524f09/auth/session", async (c) => {
   try {
@@ -352,6 +377,39 @@ app.get("/make-server-e9524f09/auth/session", async (c) => {
 });
 
 // ============ USER PROFILE ENDPOINTS ============
+
+// Search users by name/username — MUST be before /users/:userId to avoid route conflict
+app.get("/make-server-e9524f09/users/search", async (c) => {
+  try {
+    const query = c.req.query('q')?.trim().toLowerCase() || '';
+    if (!query) return c.json([]);
+
+    const { data: authData, error } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 });
+    if (error) return c.json({ error: 'Failed to list users' }, 500);
+
+    const users = await Promise.all(
+      authData.users.map(async (u: any) => {
+        const profile = await kv.get(`user:${u.id}`);
+        return profile || { id: u.id, displayName: u.user_metadata?.displayName || '', firstName: u.user_metadata?.firstName || '', lastName: u.user_metadata?.lastName || '', avatar: '', bio: '' };
+      })
+    );
+
+    const filtered = users.filter((u: any) => {
+      if (!u) return false;
+      return (
+        u.displayName?.toLowerCase().includes(query) ||
+        u.username?.toLowerCase().includes(query) ||
+        u.firstName?.toLowerCase().includes(query) ||
+        u.lastName?.toLowerCase().includes(query)
+      );
+    });
+
+    return c.json(filtered.slice(0, 20));
+  } catch (error) {
+    console.error(`Error searching users: ${error}`);
+    return c.json({ error: 'Internal server error' }, 500);
+  }
+});
 
 // Get user profile
 app.get("/make-server-e9524f09/users/:userId", async (c) => {
@@ -594,6 +652,43 @@ app.get("/make-server-e9524f09/posts/user/:userId", async (c) => {
   } catch (error) {
     console.error(`Error getting user posts: ${error}`);
     return c.json({ error: 'Internal server error getting user posts' }, 500);
+  }
+});
+
+// Search posts by content — MUST be before /posts/:postId to avoid route conflict
+app.get("/make-server-e9524f09/posts/search", async (c) => {
+  try {
+    const query = c.req.query('q')?.trim().toLowerCase() || '';
+    if (!query) return c.json([]);
+
+    const globalFeed: string[] = await kv.get('global_feed') || [];
+    const postIds = globalFeed.slice(0, 500);
+
+    const allPosts = await Promise.all(postIds.map((id: string) => kv.get(`post:${id}`)));
+    const filtered = allPosts.filter((post: any) => {
+      if (!post || post.isRepost) return false;
+      return post.content?.toLowerCase().includes(query);
+    });
+
+    const withAuthors = await Promise.all(
+      filtered.slice(0, 30).map(async (post: any) => {
+        const author = await kv.get(`user:${post.userId}`);
+        let quotedPost = null;
+        if (post.quotedPostId) {
+          const qp = await kv.get(`post:${post.quotedPostId}`);
+          if (qp) {
+            const qpAuthor = await kv.get(`user:${qp.userId}`);
+            quotedPost = { ...qp, author: qpAuthor };
+          }
+        }
+        return { ...post, author, quotedPost };
+      })
+    );
+
+    return c.json(withAuthors);
+  } catch (error) {
+    console.error(`Error searching posts: ${error}`);
+    return c.json({ error: 'Internal server error' }, 500);
   }
 });
 
@@ -1408,16 +1503,34 @@ app.get("/make-server-e9524f09/posts/trending", async (c) => {
 app.get("/make-server-e9524f09/notes", async (c) => {
   try {
     const activeNotes: string[] = await kv.get('active_notes') || [];
+    const now = Date.now();
+    const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+
     const notes = await Promise.all(
       activeNotes.map(async (userId: string) => {
         const note = await kv.get(`note:${userId}`);
         if (!note) return null;
+        // Auto-expire notes older than 24 hours
+        const noteAge = now - new Date(note.createdAt).getTime();
+        if (noteAge > TWENTY_FOUR_HOURS) {
+          // Clean up expired note
+          await kv.del(`note:${userId}`);
+          return null;
+        }
         const profile = await kv.get(`user:${userId}`);
         return { ...note, author: profile };
       })
     );
+
+    // Also clean up active_notes list by removing expired/missing entries
+    const validNotes = notes.filter(Boolean);
+    const validUserIds = validNotes.map((n: any) => n.userId);
+    if (validUserIds.length !== activeNotes.length) {
+      await kv.set('active_notes', validUserIds);
+    }
+
     // Sort by createdAt desc
-    const sorted = notes.filter(Boolean).sort((a: any, b: any) =>
+    const sorted = validNotes.sort((a: any, b: any) =>
       new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
     return c.json(sorted);
@@ -1478,6 +1591,74 @@ app.delete("/make-server-e9524f09/notes", async (c) => {
     return c.json({ success: true });
   } catch (error) {
     console.error(`Error deleting note: ${error}`);
+    return c.json({ error: 'Internal server error' }, 500);
+  }
+});
+
+// ============ SEARCH ENDPOINTS ============
+// Note: /posts/search and /users/search are defined earlier to avoid conflict with /:id routes
+
+// Get posts where a user has commented (replies)
+app.get("/make-server-e9524f09/posts/user/:userId/replies", async (c) => {
+  try {
+    const targetUserId = c.req.param('userId');
+    const globalFeed: string[] = await kv.get('global_feed') || [];
+    const postIds = globalFeed.slice(0, 500);
+
+    const matched: any[] = [];
+    for (const postId of postIds) {
+      const post = await kv.get(`post:${postId}`);
+      if (!post || post.isRepost) continue;
+      const hasComment = (post.comments || []).some((cm: any) => cm.userId === targetUserId);
+      if (hasComment) {
+        const author = await kv.get(`user:${post.userId}`);
+        let quotedPost = null;
+        if (post.quotedPostId) {
+          const qp = await kv.get(`post:${post.quotedPostId}`);
+          if (qp) {
+            const qpAuthor = await kv.get(`user:${qp.userId}`);
+            quotedPost = { ...qp, author: qpAuthor };
+          }
+        }
+        matched.push({ ...post, author, quotedPost });
+        if (matched.length >= 30) break;
+      }
+    }
+    return c.json(matched);
+  } catch (error) {
+    console.error(`Error getting user replies: ${error}`);
+    return c.json({ error: 'Internal server error' }, 500);
+  }
+});
+
+// Get posts liked by a user
+app.get("/make-server-e9524f09/posts/user/:userId/likes", async (c) => {
+  try {
+    const targetUserId = c.req.param('userId');
+    const globalFeed: string[] = await kv.get('global_feed') || [];
+    const postIds = globalFeed.slice(0, 500);
+
+    const matched: any[] = [];
+    for (const postId of postIds) {
+      const post = await kv.get(`post:${postId}`);
+      if (!post) continue;
+      if ((post.likes || []).includes(targetUserId)) {
+        const author = await kv.get(`user:${post.userId}`);
+        let quotedPost = null;
+        if (post.quotedPostId) {
+          const qp = await kv.get(`post:${post.quotedPostId}`);
+          if (qp) {
+            const qpAuthor = await kv.get(`user:${qp.userId}`);
+            quotedPost = { ...qp, author: qpAuthor };
+          }
+        }
+        matched.push({ ...post, author, quotedPost });
+        if (matched.length >= 30) break;
+      }
+    }
+    return c.json(matched);
+  } catch (error) {
+    console.error(`Error getting user liked posts: ${error}`);
     return c.json({ error: 'Internal server error' }, 500);
   }
 });

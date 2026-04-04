@@ -1,9 +1,9 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { useAuth } from './AuthContext';
 import { projectId } from '/utils/supabase/info';
 import { toast } from 'sonner';
 import {
-  Image, Video, Send, X, Loader2, Link2, BarChart2, Plus, Trash2,
+  Image, Video, Send, X, Loader2, Link2, BarChart2, Plus, Trash2, ClipboardPaste,
 } from 'lucide-react';
 
 interface CreatePostProps {
@@ -67,6 +67,7 @@ export function CreatePost({ onPostCreated }: CreatePostProps) {
   const [mediaFiles, setMediaFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
   const [previews, setPreviews] = useState<{ url: string; type: string }[]>([]);
+  const [pasteHighlight, setPasteHighlight] = useState(false);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const videoInputRef = useRef<HTMLInputElement>(null);
 
@@ -79,30 +80,65 @@ export function CreatePost({ onPostCreated }: CreatePostProps) {
   const [showPoll, setShowPoll] = useState(false);
   const [pollOptions, setPollOptions] = useState<PollOption[]>([{ text: '' }, { text: '' }]);
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
-    if (files.length + mediaFiles.length > 4) {
-      toast.error('Máximo de 4 arquivos de mídia');
-      return;
+  const addFiles = useCallback((files: File[]) => {
+    const remaining = 4 - mediaFiles.length;
+    const toAdd = files.slice(0, remaining);
+    if (files.length > remaining) {
+      toast.error(`Máximo de 4 arquivos. Adicionando apenas ${remaining}.`);
     }
-    for (const file of files) {
+    const valid: File[] = [];
+    for (const file of toAdd) {
       const isVideo = file.type.startsWith('video');
       const limitMB = isVideo ? MAX_VIDEO_MB : MAX_IMAGE_MB;
       if (file.size > limitMB * 1024 * 1024) {
         toast.error(`${file.name} é grande demais (máx ${limitMB} MB)`);
-        return;
+        continue;
       }
+      valid.push(file);
     }
-    setMediaFiles(prev => [...prev, ...files]);
-    files.forEach(file => {
+    if (valid.length === 0) return;
+    setMediaFiles(prev => [...prev, ...valid]);
+    valid.forEach(file => {
       const reader = new FileReader();
       reader.onloadend = () => {
         setPreviews(prev => [...prev, { url: reader.result as string, type: file.type }]);
       };
       reader.readAsDataURL(file);
     });
+  }, [mediaFiles.length]);
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    addFiles(files);
     e.target.value = '';
   };
+
+  // Handle Ctrl+V paste anywhere inside the component
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    const items = Array.from(e.clipboardData.items);
+    const imageItems = items.filter(item => item.kind === 'file' && item.type.startsWith('image/'));
+    if (imageItems.length === 0) return;
+
+    // Only prevent default if we have images (let text paste work normally)
+    e.preventDefault();
+
+    const files = imageItems
+      .map(item => item.getAsFile())
+      .filter((f): f is File => f !== null)
+      .map((f, i) => {
+        // Give a proper name if missing
+        const ext = f.type.split('/')[1] || 'png';
+        return new File([f], `imagem_colada_${Date.now()}_${i}.${ext}`, { type: f.type });
+      });
+
+    if (files.length > 0) {
+      addFiles(files);
+      // Flash highlight feedback
+      setPasteHighlight(true);
+      setTimeout(() => setPasteHighlight(false), 600);
+      toast.success(`📋 ${files.length === 1 ? 'Imagem colada!' : `${files.length} imagens coladas!`}`);
+    }
+  }, [addFiles]);
 
   const removeFile = (index: number) => {
     setMediaFiles(files => files.filter((_, i) => i !== index));
@@ -228,7 +264,12 @@ export function CreatePost({ onPostCreated }: CreatePostProps) {
   const youtubeId = embedUrl ? getYoutubeId(embedUrl) : null;
 
   return (
-    <div className="bg-card border border-border rounded-2xl p-5 hover:border-border/80 transition-colors">
+    <div
+      className={`bg-card border rounded-2xl p-5 hover:border-border/80 transition-all ${
+        pasteHighlight ? 'border-primary shadow-lg shadow-primary/20' : 'border-border'
+      }`}
+      onPaste={handlePaste}
+    >
       <div className="flex gap-4">
         {/* Avatar */}
         <div className="shrink-0">
@@ -252,6 +293,14 @@ export function CreatePost({ onPostCreated }: CreatePostProps) {
             rows={3}
             disabled={uploading}
           />
+
+          {/* Paste hint */}
+          {mediaFiles.length === 0 && !showEmbed && !showPoll && (
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground/50 mb-2 select-none pointer-events-none">
+              <ClipboardPaste className="w-3 h-3" />
+              <span>Cole uma imagem aqui com Ctrl+V</span>
+            </div>
+          )}
 
           {/* Media Previews */}
           {previews.length > 0 && (
