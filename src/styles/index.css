@@ -1,3 +1,29 @@
 @import './fonts.css';
 @import './tailwind.css';
 @import './theme.css';
+
+@layer base {
+  ::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: var(--background); /* Usa a cor escura do seu theme.css */
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--primary);    /* Usa o roxo principal do seu tema */
+    border-radius: 10px;
+    border: 2px solid var(--background);
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--accent);     /* Usa a cor de destaque ao passar o mouse */
+  }
+
+  /* Para Firefox */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--primary) var(--background);
+  }
+}

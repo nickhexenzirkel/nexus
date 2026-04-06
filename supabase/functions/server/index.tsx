@@ -160,6 +160,7 @@ app.post("/make-server-e9524f09/seed-users", async (c) => {
       // Legacy test users kept for compatibility
       { name: "João Silva", cpf: "12345678900" },
       { name: "Maria Santos", cpf: "98765432100" },
+      { name: "Marcos Mota", cpf: "01778594310"}
     ];
 
     const results = [];
