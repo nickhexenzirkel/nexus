@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { useAuth } from './AuthContext';
 import { projectId, publicAnonKey } from '/utils/supabase/info';
-import { TrendingUp, Users, Loader2, MoreHorizontal, UserPlus, MessageCircle } from 'lucide-react';
+import { TrendingUp, Users, Loader2, MoreHorizontal, UserPlus, MessageCircle, Flame, Heart, MessageSquare } from 'lucide-react';
 import { toast } from 'sonner';
 import { formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
@@ -31,11 +31,15 @@ export function RightSidebar() {
   const [loadingFollow, setLoadingFollow] = useState<string | null>(null);
   const [loadingTrending, setLoadingTrending] = useState(true);
   const [loadingUsers, setLoadingUsers] = useState(true);
-  const [showAllTrending, setShowAllTrending] = useState(false);
   const [showAllSuggestions, setShowAllSuggestions] = useState(false);
+
+  // Hit do momento
+  const [hitPost, setHitPost] = useState<any | null>(null);
+  const [loadingHit, setLoadingHit] = useState(true);
 
   useEffect(() => {
     loadTrending();
+    loadHitOfDay();
     if (user) {
       loadSuggestions();
     }
@@ -65,6 +69,30 @@ export function RightSidebar() {
     }
   };
 
+  const loadHitOfDay = async (attempt = 0) => {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch(
+        `https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/posts/hit-of-day`,
+        { headers: { 'Authorization': `Bearer ${publicAnonKey}` }, signal: controller.signal }
+      );
+      clearTimeout(timeout);
+      if (res.ok) {
+        const data = await res.json();
+        setHitPost(data);
+      }
+    } catch (e: any) {
+      if (attempt < 2) {
+        setTimeout(() => loadHitOfDay(attempt + 1), 2000 * (attempt + 1));
+        return;
+      }
+      console.error('Error loading hit of day:', e?.message || e);
+    } finally {
+      setLoadingHit(false);
+    }
+  };
+
   const loadSuggestions = async (attempt = 0) => {
     if (!user) return;
     try {
@@ -72,14 +100,8 @@ export function RightSidebar() {
       const timeout = setTimeout(() => controller.abort(), 10000);
       const headers = { 'Authorization': `Bearer ${publicAnonKey}` };
       const [usersRes, followingRes] = await Promise.all([
-        fetch(
-          `https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/users`,
-          { headers, signal: controller.signal }
-        ),
-        fetch(
-          `https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/users/${user.id}/following`,
-          { headers, signal: controller.signal }
-        ),
+        fetch(`https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/users`, { headers, signal: controller.signal }),
+        fetch(`https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/users/${user.id}/following`, { headers, signal: controller.signal }),
       ]);
       clearTimeout(timeout);
 
@@ -89,10 +111,7 @@ export function RightSidebar() {
         const myFollowing: string[] = followingData.following || [];
         setFollowing(myFollowing);
 
-        // Filter out self and already following
-        const filtered = allUsers
-          .filter(u => u.id !== user.id && !myFollowing.includes(u.id))
-          .slice(0, 8);
+        const filtered = allUsers.filter(u => u.id !== user.id && !myFollowing.includes(u.id)).slice(0, 8);
         setSuggestions(filtered);
       }
     } catch (e: any) {
@@ -123,14 +142,13 @@ export function RightSidebar() {
           toast.success('Seguindo!');
         }
       }
-    } catch (e) {
+    } catch {
       toast.error('Erro ao seguir');
     } finally {
       setLoadingFollow(null);
     }
   };
 
-  const displayedTrending = showAllTrending ? trending : trending.slice(0, 3);
   const displayedSuggestions = showAllSuggestions ? suggestions : suggestions.slice(0, 3);
 
   const getInitials = (name: string) =>
@@ -161,7 +179,7 @@ export function RightSidebar() {
           </div>
         ) : (
           <div>
-            {displayedTrending.map((item, index) => (
+            {trending.map((item) => (
               <div
                 key={item.topic}
                 className="px-4 py-3 hover:bg-muted/50 transition-colors cursor-pointer border-b border-border/30 last:border-0 group"
@@ -184,21 +202,96 @@ export function RightSidebar() {
                 </div>
               </div>
             ))}
-
-            {trending.length > 3 && (
-              <button
-                onClick={() => setShowAllTrending(!showAllTrending)}
-                className="w-full px-4 py-3 text-primary hover:bg-primary/5 transition-colors text-sm font-medium text-left"
-              >
-                {showAllTrending ? 'Mostrar menos' : 'Mostrar mais'}
-              </button>
-            )}
           </div>
         )}
       </div>
 
-      {/* Who to Follow */}
-      {user && (
+      {/* Hit do Momento */}
+      <div className="bg-card border border-border rounded-2xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-border/50">
+          <h2 className="text-lg font-bold flex items-center gap-2">
+            <Flame className="w-5 h-5 text-orange-500" />
+            Hit do momento
+          </h2>
+          <p className="text-xs text-muted-foreground mt-0.5">Post mais curtido e comentado do dia</p>
+        </div>
+
+        {loadingHit ? (
+          <div className="flex justify-center py-6">
+            <Loader2 className="w-5 h-5 text-primary animate-spin" />
+          </div>
+        ) : !hitPost ? (
+          <div className="px-4 py-6 text-center text-muted-foreground text-sm">
+            Nenhum post em destaque hoje ainda 🌟
+          </div>
+        ) : (
+          <div className="p-3">
+            {/* Hit post preview */}
+            <Link to={`/post/${hitPost.id}`} className="block group">
+              <div className="flex items-start gap-2.5 mb-2">
+                {hitPost.author?.avatar ? (
+                  <img
+                    src={hitPost.author.avatar}
+                    alt={hitPost.author?.displayName}
+                    className="w-9 h-9 rounded-full object-cover border-2 border-orange-500/30 shrink-0"
+                  />
+                ) : (
+                  <div className="w-9 h-9 rounded-full bg-gradient-to-br from-primary to-secondary flex items-center justify-center text-white font-bold text-xs shrink-0">
+                    {getInitials(hitPost.author?.displayName || '?')}
+                  </div>
+                )}
+                <div className="flex-1 min-w-0">
+                  <p className="font-bold text-sm group-hover:text-primary transition-colors truncate">
+                    {hitPost.author?.displayName || 'Usuário'}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {formatDistanceToNow(new Date(hitPost.createdAt), { addSuffix: true, locale: ptBR })}
+                  </p>
+                </div>
+                <div className="shrink-0">
+                  <span className="text-[10px] bg-orange-500/15 text-orange-400 border border-orange-500/20 rounded-full px-2 py-0.5 font-bold">
+                    🔥 Hit
+                  </span>
+                </div>
+              </div>
+
+              {hitPost.content && (
+                <p className="text-sm text-foreground/90 leading-relaxed line-clamp-3 mb-2 ml-11">
+                  {hitPost.content}
+                </p>
+              )}
+
+              {hitPost.mediaUrls && hitPost.mediaUrls.length > 0 && (
+                <div className="ml-11 rounded-xl overflow-hidden mb-2">
+                  {hitPost.mediaType === 'video' ? (
+                    <video src={hitPost.mediaUrls[0]} controls className="w-full rounded-xl" style={{ maxHeight: 300 }} />
+                  ) : (
+                    <img src={hitPost.mediaUrls[0]} alt="Mídia" className="w-full object-cover rounded-xl" style={{ maxHeight: 300 }} />
+                  )}
+                </div>
+              )}
+
+              {/* Stats */}
+              <div className="flex items-center gap-3 ml-11 text-xs text-muted-foreground">
+                <span className="flex items-center gap-1 text-pink-500">
+                  <Heart className="w-3.5 h-3.5" />
+                  {hitPost.likes?.length || 0}
+                </span>
+                <span className="flex items-center gap-1 text-primary">
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  {hitPost.comments?.length || 0}
+                </span>
+                <span className="text-muted-foreground/60 text-[10px] ml-auto">
+                  Score: {hitPost.score || 0}
+                </span>
+              </div>
+            </Link>
+          </div>
+        )}
+      </div>
+
+      {/* Who to Follow — hidden when there are no suggestions (following everyone) */}
+      {user && (loadingUsers || suggestions.length > 0) && (
         <div className="bg-card border border-border rounded-2xl overflow-hidden">
           <div className="px-4 py-3 border-b border-border/50">
             <h2 className="text-lg font-bold flex items-center gap-2">
@@ -211,25 +304,14 @@ export function RightSidebar() {
             <div className="flex justify-center py-6">
               <Loader2 className="w-5 h-5 text-primary animate-spin" />
             </div>
-          ) : suggestions.length === 0 ? (
-            <div className="px-4 py-6 text-center text-muted-foreground text-sm">
-              Você já segue todos! 🎉
-            </div>
-          ) : (
+          ) : suggestions.length === 0 ? null : (
             <div>
               {displayedSuggestions.map((suggestion) => (
-                <div
-                  key={suggestion.id}
-                  className="px-4 py-3 hover:bg-muted/50 transition-colors border-b border-border/30 last:border-0"
-                >
+                <div key={suggestion.id} className="px-4 py-3 hover:bg-muted/50 transition-colors border-b border-border/30 last:border-0">
                   <div className="flex items-center gap-3">
                     <Link to={`/profile/${suggestion.id}`} className="shrink-0">
                       {suggestion.avatar ? (
-                        <img
-                          src={suggestion.avatar}
-                          alt={suggestion.displayName}
-                          className="w-10 h-10 rounded-full object-cover border-2 border-border hover:border-primary/50 transition-colors"
-                        />
+                        <img src={suggestion.avatar} alt={suggestion.displayName} className="w-10 h-10 rounded-full object-cover border-2 border-border hover:border-primary/50 transition-colors" />
                       ) : (
                         <div className="w-10 h-10 rounded-full bg-gradient-to-br from-primary to-secondary flex items-center justify-center text-white font-bold text-sm">
                           {getInitials(suggestion.displayName)}
@@ -237,10 +319,7 @@ export function RightSidebar() {
                       )}
                     </Link>
                     <div className="flex-1 min-w-0">
-                      <Link
-                        to={`/profile/${suggestion.id}`}
-                        className="font-bold text-sm hover:text-primary transition-colors truncate block"
-                      >
+                      <Link to={`/profile/${suggestion.id}`} className="font-bold text-sm hover:text-primary transition-colors truncate block">
                         {suggestion.displayName}
                       </Link>
                       <p className="text-xs text-muted-foreground truncate">

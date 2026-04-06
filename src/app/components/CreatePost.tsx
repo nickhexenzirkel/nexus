@@ -13,17 +13,53 @@ interface CreatePostProps {
 const MAX_IMAGE_MB = 10;
 const MAX_VIDEO_MB = 50;
 
+async function compressImage(file: File): Promise<File> {
+  if (!file.type.startsWith('image/') || file.type === 'image/gif') return file;
+  const MAX_DIM = 1920;
+  const MAX_BYTES = 2 * 1024 * 1024; // 2MB threshold
+  if (file.size <= MAX_BYTES) return file;
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      const scale = Math.min(MAX_DIM / width, MAX_DIM / height, 1);
+      width = Math.round(width * scale);
+      height = Math.round(height * scale);
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(img, 0, 0, width, height);
+      const outType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+      canvas.toBlob((blob) => {
+        if (!blob) { resolve(file); return; }
+        const ext = outType === 'image/png' ? 'png' : 'jpg';
+        const compressed = new File([blob], `${file.name.split('.')[0]}.${ext}`, { type: outType });
+        console.log(`Compressed ${file.name}: ${(file.size / 1024).toFixed(0)}KB → ${(compressed.size / 1024).toFixed(0)}KB`);
+        resolve(compressed.size < file.size ? compressed : file);
+      }, outType, 0.85);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
+    img.src = url;
+  });
+}
+
 async function uploadFileDirect(
   file: File,
   authHeaders: Record<string, string>,
   projectId: string
 ): Promise<string> {
+  // Compress images before uploading
+  const processedFile = file.type.startsWith('image/') ? await compressImage(file) : file;
   const signRes = await fetch(
     `https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/upload/sign`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders },
-      body: JSON.stringify({ filename: file.name, contentType: file.type, fileSize: file.size }),
+      body: JSON.stringify({ filename: processedFile.name, contentType: processedFile.type, fileSize: processedFile.size }),
     }
   );
   if (!signRes.ok) {
@@ -33,8 +69,8 @@ async function uploadFileDirect(
   const { signedUrl, publicUrl, contentType } = await signRes.json();
   const uploadRes = await fetch(signedUrl, {
     method: 'PUT',
-    headers: { 'Content-Type': contentType || file.type },
-    body: file,
+    headers: { 'Content-Type': contentType || processedFile.type },
+    body: processedFile,
   });
   if (!uploadRes.ok) throw new Error(`Falha ao enviar arquivo: ${uploadRes.status}`);
   return publicUrl as string;

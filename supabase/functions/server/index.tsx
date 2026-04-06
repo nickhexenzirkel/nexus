@@ -493,6 +493,58 @@ app.put("/make-server-e9524f09/users/:userId", async (c) => {
   }
 });
 
+// ============ MENTION HELPERS ============
+
+function extractMentionHandles(content: string): string[] {
+  const matches = content.match(/@([a-zA-Z0-9_.]+)/g) || [];
+  return [...new Set(matches.map(m => m.slice(1).toLowerCase()))];
+}
+
+async function sendMentionNotifications(
+  content: string,
+  fromUserId: string,
+  postId: string
+) {
+  const handles = extractMentionHandles(content);
+  if (handles.length === 0) return;
+
+  const fromProfile = await kv.get(`user:${fromUserId}`);
+  let allUsers: any[] = [];
+  try {
+    const { data: authData } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 });
+    allUsers = authData?.users || [];
+  } catch { return; }
+
+  for (const handle of handles) {
+    for (const u of allUsers) {
+      if (u.id === fromUserId) continue;
+      const profile = await kv.get(`user:${u.id}`);
+      const username = (profile?.username || '').toLowerCase();
+      const autoHandle = removeAccents(
+        `${(profile?.firstName || '').toLowerCase()}${(profile?.lastName || '').toLowerCase()}`
+      );
+      if (username === handle || autoHandle === handle) {
+        const notification = {
+          id: crypto.randomUUID(),
+          type: 'mention',
+          fromUserId,
+          fromUserName: fromProfile?.displayName || 'Alguém',
+          fromUserAvatar: fromProfile?.avatar || '',
+          postId,
+          postContent: content.substring(0, 60),
+          read: false,
+          createdAt: new Date().toISOString(),
+        };
+        const notifs = await kv.get(`notifications:${u.id}`) || [];
+        notifs.unshift(notification);
+        if (notifs.length > 100) notifs.splice(100);
+        await kv.set(`notifications:${u.id}`, notifs);
+        break;
+      }
+    }
+  }
+}
+
 // ============ POSTS ENDPOINTS ============
 
 // Create post
@@ -556,6 +608,11 @@ app.post("/make-server-e9524f09/posts", async (c) => {
     }
     await kv.set('global_feed', globalFeed);
 
+    // Send mention notifications for @mentions in content
+    if (content) {
+      await sendMentionNotifications(content, user.id, postId);
+    }
+
     // Notify the quoted post author
     if (quotedPostId) {
       const quotedPost = await kv.get(`post:${quotedPostId}`);
@@ -611,7 +668,25 @@ app.get("/make-server-e9524f09/posts/feed", async (c) => {
           }
         }
 
-        return { ...post, author: userProfile, quotedPost };
+        // For reposts, fetch original post and its author
+        let originalPost = null;
+        if (post.isRepost && post.originalPostId) {
+          const op = await kv.get(`post:${post.originalPostId}`);
+          if (op) {
+            const opAuthor = await kv.get(`user:${op.userId}`);
+            let opQuotedPost = null;
+            if (op.quotedPostId) {
+              const oqp = await kv.get(`post:${op.quotedPostId}`);
+              if (oqp) {
+                const oqpAuthor = await kv.get(`user:${oqp.userId}`);
+                opQuotedPost = { ...oqp, author: oqpAuthor };
+              }
+            }
+            originalPost = { ...op, author: opAuthor, quotedPost: opQuotedPost };
+          }
+        }
+
+        return { ...post, author: userProfile, quotedPost, originalPost };
       })
     );
 
@@ -633,7 +708,7 @@ app.get("/make-server-e9524f09/posts/user/:userId", async (c) => {
         const post = await kv.get(`post:${postId}`);
         if (!post) return null;
         
-        const userProfile = await kv.get(`user:${userId}`);
+        const userProfile = await kv.get(`user:${post.userId}`);
 
         let quotedPost = null;
         if (post.quotedPostId) {
@@ -644,7 +719,16 @@ app.get("/make-server-e9524f09/posts/user/:userId", async (c) => {
           }
         }
 
-        return { ...post, author: userProfile, quotedPost };
+        let originalPost = null;
+        if (post.isRepost && post.originalPostId) {
+          const op = await kv.get(`post:${post.originalPostId}`);
+          if (op) {
+            const opAuthor = await kv.get(`user:${op.userId}`);
+            originalPost = { ...op, author: opAuthor };
+          }
+        }
+
+        return { ...post, author: userProfile, quotedPost, originalPost };
       })
     );
 
@@ -733,7 +817,7 @@ app.get("/make-server-e9524f09/posts/trending", async (c) => {
     const trending = Object.entries(wordData)
       .filter(([, d]) => d.count >= 1)
       .sort((a, b) => b[1].count - a[1].count || b[1].users.size - a[1].users.size)
-      .slice(0, 5)
+      .slice(0, 3)
       .map(([word, d]) => ({
         topic: word.charAt(0).toUpperCase() + word.slice(1),
         count: d.count,
@@ -743,6 +827,48 @@ app.get("/make-server-e9524f09/posts/trending", async (c) => {
     return c.json(trending);
   } catch (error) {
     console.error(`Error getting trending: ${error}`);
+    return c.json({ error: 'Internal server error' }, 500);
+  }
+});
+
+// ============ HIT DO MOMENTO — must be before /posts/:postId ============
+app.get("/make-server-e9524f09/posts/hit-of-day", async (c) => {
+  try {
+    const globalFeed: string[] = await kv.get('global_feed') || [];
+    const recentIds = globalFeed.slice(0, 300);
+    const now = Date.now();
+    const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+
+    const posts = await Promise.all(recentIds.map((id: string) => kv.get(`post:${id}`)));
+    const todayPosts = posts.filter((p: any) => {
+      if (!p || p.isRepost) return false;
+      const age = now - new Date(p.createdAt).getTime();
+      return age <= TWENTY_FOUR_HOURS;
+    });
+
+    if (todayPosts.length === 0) return c.json(null);
+
+    // Score = likes * 2 + comments * 3
+    const scored = todayPosts.map((p: any) => ({
+      post: p,
+      score: (p.likes?.length || 0) * 2 + (p.comments?.length || 0) * 3,
+    }));
+    scored.sort((a: any, b: any) => b.score - a.score);
+    const best = scored[0];
+    if (!best || best.score === 0) return c.json(null);
+
+    const author = await kv.get(`user:${best.post.userId}`);
+    let quotedPost = null;
+    if (best.post.quotedPostId) {
+      const qp = await kv.get(`post:${best.post.quotedPostId}`);
+      if (qp) {
+        const qpAuthor = await kv.get(`user:${qp.userId}`);
+        quotedPost = { ...qp, author: qpAuthor };
+      }
+    }
+    return c.json({ ...best.post, author, quotedPost, score: best.score });
+  } catch (error) {
+    console.error(`Error getting hit of day: ${error}`);
     return c.json({ error: 'Internal server error' }, 500);
   }
 });
@@ -768,7 +894,16 @@ app.get("/make-server-e9524f09/posts/:postId", async (c) => {
       }
     }
 
-    return c.json({ ...post, author: userProfile, quotedPost });
+    let originalPost = null;
+    if (post.isRepost && post.originalPostId) {
+      const op = await kv.get(`post:${post.originalPostId}`);
+      if (op) {
+        const opAuthor = await kv.get(`user:${op.userId}`);
+        originalPost = { ...op, author: opAuthor };
+      }
+    }
+
+    return c.json({ ...post, author: userProfile, quotedPost, originalPost });
   } catch (error) {
     console.error(`Error getting post: ${error}`);
     return c.json({ error: 'Internal server error getting post' }, 500);
@@ -893,9 +1028,13 @@ app.post("/make-server-e9524f09/posts/:postId/repost", async (c) => {
     originalPost.reposts = [...reposts, user.id];
     await kv.set(`post:${postId}`, originalPost);
 
+    // Create repost entry
+    const repostId = crypto.randomUUID();
+    const fromUserProfile = await kv.get(`user:${user.id}`);
+    const originalAuthor = await kv.get(`user:${originalPost.userId}`);
+
     // Repost notification for the original author
     if (originalPost.userId !== user.id) {
-      const fromUserProfile = await kv.get(`user:${user.id}`);
       const notification = {
         id: crypto.randomUUID(),
         type: 'repost',
@@ -912,17 +1051,19 @@ app.post("/make-server-e9524f09/posts/:postId/repost", async (c) => {
       if (notifs.length > 100) notifs.splice(100);
       await kv.set(`notifications:${originalPost.userId}`, notifs);
     }
-
-    // Create repost entry
-    const repostId = crypto.randomUUID();
     const repost = {
       id: repostId,
       userId: user.id,
-      content: originalPost.content,
-      mediaUrls: originalPost.mediaUrls || [],
-      mediaType: originalPost.mediaType || null,
+      content: '',
+      mediaUrls: [],
+      mediaType: null,
       isRepost: true,
       originalPostId: postId,
+      reposterName: fromUserProfile?.displayName || '',
+      reposterAvatar: fromUserProfile?.avatar || '',
+      originalAuthorId: originalPost.userId,
+      originalAuthorName: originalAuthor?.displayName || '',
+      originalAuthorAvatar: originalAuthor?.avatar || '',
       likes: [],
       reposts: [],
       comments: [],
@@ -968,23 +1109,31 @@ app.post("/make-server-e9524f09/posts/:postId/comment", async (c) => {
       return c.json({ error: 'Post not found' }, 404);
     }
 
-    const { content } = await c.req.json();
+    const { content, parentCommentId, mediaUrls, mediaType, embedUrl, embedType } = await c.req.json();
 
-    if (!content || !content.trim()) {
-      return c.json({ error: 'Comment content is required' }, 400);
+    // Allow empty text content when media or embed is present
+    const hasMedia = mediaUrls && mediaUrls.length > 0;
+    const hasEmbed = !!embedUrl;
+    if (!content?.trim() && !hasMedia && !hasEmbed) {
+      return c.json({ error: 'Comment must have text, media, or a link' }, 400);
     }
 
     const userProfile = await kv.get(`user:${user.id}`);
 
     const commentId = crypto.randomUUID();
-    const comment = {
+    const comment: any = {
       id: commentId,
       userId: user.id,
       content: content.trim(),
       authorName: userProfile?.displayName || 'Usuário',
       authorAvatar: userProfile?.avatar || '',
+      authorUsername: userProfile?.username || '',
       createdAt: new Date().toISOString(),
     };
+
+    if (parentCommentId) comment.parentCommentId = parentCommentId;
+    if (mediaUrls?.length) { comment.mediaUrls = mediaUrls; comment.mediaType = mediaType || 'image'; }
+    if (embedUrl) { comment.embedUrl = embedUrl; comment.embedType = embedType || null; }
 
     const comments = post.comments || [];
     comments.push(comment);
@@ -1011,10 +1160,45 @@ app.post("/make-server-e9524f09/posts/:postId/comment", async (c) => {
       await kv.set(`notifications:${post.userId}`, notifs);
     }
 
+    // Send mention notifications for @mentions in comment
+    await sendMentionNotifications(content.trim(), user.id, postId);
+
     return c.json(comment);
   } catch (error) {
     console.error(`Error commenting on post: ${error}`);
     return c.json({ error: 'Internal server error during comment' }, 500);
+  }
+});
+
+// Delete a comment
+app.delete("/make-server-e9524f09/posts/:postId/comment/:commentId", async (c) => {
+  try {
+    const user = verifyUserToken(getUserToken(c));
+    if (!user) return c.json({ error: 'Unauthorized' }, 401);
+
+    const postId = c.req.param('postId');
+    const commentId = c.req.param('commentId');
+
+    const post = await kv.get(`post:${postId}`);
+    if (!post) return c.json({ error: 'Post not found' }, 404);
+
+    const comments = post.comments || [];
+    const commentIndex = comments.findIndex((c: any) => c.id === commentId);
+
+    if (commentIndex === -1) return c.json({ error: 'Comment not found' }, 404);
+
+    const comment = comments[commentIndex];
+    if (comment.userId !== user.id) return c.json({ error: 'Forbidden: you can only delete your own comments' }, 403);
+
+    // Remove the comment and any replies to it
+    post.comments = comments.filter((c: any) => c.id !== commentId && c.parentCommentId !== commentId);
+    await kv.set(`post:${postId}`, post);
+
+    console.log(`Deleted comment ${commentId} from post ${postId} by user ${user.id}`);
+    return c.json({ success: true });
+  } catch (error) {
+    console.error(`Error deleting comment: ${error}`);
+    return c.json({ error: 'Internal server error deleting comment' }, 500);
   }
 });
 
@@ -1520,7 +1704,8 @@ app.get("/make-server-e9524f09/notes", async (c) => {
           return null;
         }
         const profile = await kv.get(`user:${userId}`);
-        return { ...note, author: profile };
+        const reactions = await kv.get(`note_reactions:${userId}`) || { laugh: [], cry: [], heart: [], tomato: [], broken_heart: [] };
+        return { ...note, author: profile, reactions };
       })
     );
 
@@ -1587,12 +1772,58 @@ app.delete("/make-server-e9524f09/notes", async (c) => {
     if (!user) return c.json({ error: 'Unauthorized' }, 401);
 
     await kv.del(`note:${user.id}`);
+    await kv.del(`note_reactions:${user.id}`);
     const activeNotes: string[] = await kv.get('active_notes') || [];
     await kv.set('active_notes', activeNotes.filter((id: string) => id !== user.id));
 
     return c.json({ success: true });
   } catch (error) {
     console.error(`Error deleting note: ${error}`);
+    return c.json({ error: 'Internal server error' }, 500);
+  }
+});
+
+// React to a note (toggle reaction)
+app.post("/make-server-e9524f09/notes/:noteOwnerId/react", async (c) => {
+  try {
+    const user = verifyUserToken(getUserToken(c));
+    if (!user) return c.json({ error: 'Unauthorized' }, 401);
+
+    const noteOwnerId = c.req.param('noteOwnerId');
+    const { type } = await c.req.json();
+
+    const validTypes = ['laugh', 'cry', 'heart', 'tomato', 'broken_heart'];
+    if (!validTypes.includes(type)) {
+      return c.json({ error: 'Invalid reaction type' }, 400);
+    }
+
+    const reactionsKey = `note_reactions:${noteOwnerId}`;
+    const reactions: Record<string, string[]> = await kv.get(reactionsKey) || {
+      laugh: [], cry: [], heart: [], tomato: [], broken_heart: []
+    };
+
+    // Ensure all types exist
+    for (const t of validTypes) {
+      if (!reactions[t]) reactions[t] = [];
+    }
+
+    // Check if user already reacted with this type
+    const alreadyReacted = reactions[type].includes(user.id);
+
+    // Remove user from ALL reaction types first
+    for (const t of validTypes) {
+      reactions[t] = reactions[t].filter((id: string) => id !== user.id);
+    }
+
+    // If not already reacted with this type, add it (toggle off if same)
+    if (!alreadyReacted) {
+      reactions[type].push(user.id);
+    }
+
+    await kv.set(reactionsKey, reactions);
+    return c.json({ reactions, myReaction: alreadyReacted ? null : type });
+  } catch (error) {
+    console.error(`Error reacting to note: ${error}`);
     return c.json({ error: 'Internal server error' }, 500);
   }
 });

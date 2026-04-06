@@ -2,14 +2,14 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router';
 import { useAuth } from '../components/AuthContext';
 import { projectId, publicAnonKey } from '/utils/supabase/info';
-import { Bell, Heart, MessageCircle, Repeat2, UserPlus, MessageSquare, Loader2, CheckCheck } from 'lucide-react';
+import { Bell, Heart, MessageCircle, Repeat2, UserPlus, MessageSquare, Loader2, CheckCheck, AtSign } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { toast } from 'sonner';
 
 interface Notification {
   id: string;
-  type: 'like' | 'comment' | 'follow' | 'repost' | 'message';
+  type: 'like' | 'comment' | 'follow' | 'repost' | 'message' | 'mention' | 'quote';
   fromUserId: string;
   fromUserName: string;
   fromUserAvatar?: string;
@@ -26,6 +26,8 @@ const notifIcons: Record<string, { icon: any; color: string; label: string }> = 
   repost: { icon: Repeat2, color: 'text-green-500', label: 'repostou seu post' },
   follow: { icon: UserPlus, color: 'text-blue-400', label: 'começou a te seguir' },
   message: { icon: MessageSquare, color: 'text-purple-400', label: 'te enviou uma mensagem' },
+  mention: { icon: AtSign, color: 'text-yellow-400', label: 'mencionou você' },
+  quote: { icon: MessageCircle, color: 'text-primary', label: 'citou seu post' },
 };
 
 export function Notifications() {
@@ -132,6 +134,10 @@ export function Notifications() {
               ? `te enviou: "${notif.content}"`
               : notif.type === 'comment'
               ? `comentou: "${notif.postContent}"`
+              : notif.type === 'mention'
+              ? `mencionou você: "${notif.postContent}"`
+              : notif.type === 'quote'
+              ? `citou seu post: "${notif.postContent}"`
               : meta.label;
 
             return (

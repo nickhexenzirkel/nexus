@@ -124,7 +124,7 @@ export function Feed() {
 
       {/* Right Sidebar */}
       <div className="w-80 shrink-0 p-4 hidden xl:block">
-        <div className="sticky top-4">
+        <div className="sticky top-4 max-h-[calc(100vh-2rem)] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent">
           <RightSidebar />
         </div>
       </div>

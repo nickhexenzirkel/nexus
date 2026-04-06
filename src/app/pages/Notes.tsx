@@ -15,12 +15,21 @@ interface NoteAuthor {
   avatar?: string;
 }
 
+interface NoteReactions {
+  laugh: string[];
+  cry: string[];
+  heart: string[];
+  tomato: string[];
+  broken_heart: string[];
+}
+
 interface Note {
   userId: string;
   content: string;
   emoji: string;
   createdAt: string;
   author?: NoteAuthor;
+  reactions?: NoteReactions;
 }
 
 const PRESET_EMOJIS = [
@@ -30,8 +39,22 @@ const PRESET_EMOJIS = [
   '🥰', '😰', '🤩', '😶', '💤', '🫡', '🎭', '🏆',
 ];
 
+const REACTIONS = [
+  { type: 'laugh', emoji: '😂', label: 'Rir' },
+  { type: 'cry', emoji: '😢', label: 'Chorar' },
+  { type: 'heart', emoji: '❤️', label: 'Coração' },
+  { type: 'tomato', emoji: '🍅', label: 'Tomate' },
+  { type: 'broken_heart', emoji: '💔', label: 'Coração partido' },
+] as const;
+
+type ReactionType = 'laugh' | 'cry' | 'heart' | 'tomato' | 'broken_heart';
+
 function getInitials(name: string) {
   return name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
+}
+
+function getEmptyReactions(): NoteReactions {
+  return { laugh: [], cry: [], heart: [], tomato: [], broken_heart: [] };
 }
 
 interface NoteCircleProps {
@@ -48,11 +71,7 @@ function NoteCircle({ note, isOwn, onClick }: NoteCircleProps) {
   const initials = author ? getInitials(author.displayName) : '?';
 
   return (
-    <button
-      onClick={onClick}
-      className="flex flex-col items-center gap-2 group"
-      style={{ minWidth: 80 }}
-    >
+    <button onClick={onClick} className="flex flex-col items-center gap-2 group" style={{ minWidth: 80 }}>
       <div className="relative">
         <div className={`w-[72px] h-[72px] rounded-full flex items-center justify-center transition-transform group-hover:scale-105 ${
           hasNote
@@ -93,6 +112,93 @@ function NoteCircle({ note, isOwn, onClick }: NoteCircleProps) {
     </button>
   );
 }
+
+// ── Reaction Bar ──────────────────────────────────────────────────
+
+function ReactionBar({
+  noteOwnerId,
+  reactions,
+  currentUserId,
+  onReact,
+  compact = false,
+}: {
+  noteOwnerId: string;
+  reactions: NoteReactions;
+  currentUserId?: string;
+  onReact?: (type: ReactionType, newReactions: NoteReactions, myReaction: ReactionType | null) => void;
+  compact?: boolean;
+}) {
+  const { getAuthHeaders } = useAuth();
+  const [loading, setLoading] = useState<ReactionType | null>(null);
+
+  const myReaction = REACTIONS.find(r => currentUserId && reactions[r.type]?.includes(currentUserId))?.type || null;
+
+  const handleReact = async (type: ReactionType) => {
+    if (!currentUserId) { toast.error('Faça login para reagir'); return; }
+    if (loading) return;
+    setLoading(type);
+    try {
+      const authHeaders = await getAuthHeaders();
+      const res = await fetch(
+        `https://${projectId}.supabase.co/functions/v1/make-server-e9524f09/notes/${noteOwnerId}/react`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
+          body: JSON.stringify({ type }),
+        }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        if (onReact) onReact(type, data.reactions, data.myReaction);
+      } else {
+        toast.error('Erro ao reagir');
+      }
+    } catch {
+      toast.error('Erro ao reagir');
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  const totalReactions = REACTIONS.reduce((sum, r) => sum + (reactions[r.type]?.length || 0), 0);
+
+  if (compact && totalReactions === 0 && !currentUserId) return null;
+
+  return (
+    <div className={`flex items-center gap-1 flex-wrap ${compact ? '' : 'mt-3'}`}>
+      {REACTIONS.map(({ type, emoji, label }) => {
+        const count = reactions[type]?.length || 0;
+        const isMyReaction = myReaction === type;
+        const isLoading = loading === type;
+
+        return (
+          <button
+            key={type}
+            onClick={(e) => { e.stopPropagation(); handleReact(type); }}
+            disabled={!!loading}
+            title={label}
+            className={`flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium transition-all border ${
+              isMyReaction
+                ? 'bg-primary/15 border-primary/40 text-primary shadow-sm scale-105'
+                : count > 0
+                ? 'bg-muted border-border hover:border-primary/40 hover:bg-primary/5 text-foreground'
+                : 'bg-transparent border-transparent hover:border-border hover:bg-muted text-muted-foreground'
+            } disabled:cursor-not-allowed ${compact ? '' : ''}`}
+          >
+            {isLoading ? (
+              <Loader2 className="w-3 h-3 animate-spin" />
+            ) : (
+              <span className="text-sm leading-none">{emoji}</span>
+            )}
+            {count > 0 && <span>{count}</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Main Notes Component ───────────────────────────────────────────
 
 export function Notes() {
   const { user, userProfile, getAuthHeaders } = useAuth();
@@ -136,6 +242,15 @@ export function Notes() {
     if (user) loadNotes();
   }, [user]);
 
+  const handleReact = (noteOwnerId: string, type: ReactionType, newReactions: NoteReactions, myReaction: ReactionType | null) => {
+    setNotes(prev => prev.map(n =>
+      n.userId === noteOwnerId ? { ...n, reactions: newReactions } : n
+    ));
+    // Also update viewingNote if it's the same
+    setViewingNote(prev => prev && prev.userId === noteOwnerId ? { ...prev, reactions: newReactions } : prev);
+    if (myReaction) toast.success(`Reagido com ${REACTIONS.find(r => r.type === myReaction)?.emoji || ''}`);
+  };
+
   const handleSaveNote = async () => {
     if (!noteContent.trim() && !noteEmoji) {
       toast.error('Adicione um texto ou emoji à sua nota');
@@ -160,7 +275,7 @@ export function Notes() {
         const err = await res.json().catch(() => ({}));
         toast.error(err.error || 'Erro ao salvar nota');
       }
-    } catch (e) {
+    } catch {
       toast.error('Erro ao salvar nota');
     } finally {
       setSaving(false);
@@ -184,7 +299,7 @@ export function Notes() {
         setShowModal(false);
         loadNotes();
       }
-    } catch (e) {
+    } catch {
       toast.error('Erro ao excluir nota');
     } finally {
       setDeleting(false);
@@ -289,22 +404,21 @@ export function Notes() {
                     <p className="text-xs text-muted-foreground mt-1">
                       {formatDistanceToNow(new Date(myNote.createdAt), { addSuffix: true, locale: ptBR })}
                     </p>
+                    {/* Reactions on own note */}
+                    <ReactionBar
+                      noteOwnerId={myNote.userId}
+                      reactions={myNote.reactions || getEmptyReactions()}
+                      currentUserId={user?.id}
+                      onReact={(type, newReactions, myReaction) => handleReact(myNote.userId, type, newReactions, myReaction)}
+                      compact
+                    />
                   </div>
                 </div>
                 <div className="flex gap-1 shrink-0">
-                  <button
-                    onClick={() => openModal(myNote)}
-                    className="p-1.5 rounded-full hover:bg-primary/10 text-muted-foreground hover:text-primary transition-colors"
-                    title="Editar nota"
-                  >
+                  <button onClick={() => openModal(myNote)} className="p-1.5 rounded-full hover:bg-primary/10 text-muted-foreground hover:text-primary transition-colors" title="Editar nota">
                     <Pencil className="w-4 h-4" />
                   </button>
-                  <button
-                    onClick={handleDeleteNote}
-                    disabled={deleting}
-                    className="p-1.5 rounded-full hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors disabled:opacity-50"
-                    title="Excluir nota"
-                  >
+                  <button onClick={handleDeleteNote} disabled={deleting} className="p-1.5 rounded-full hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors disabled:opacity-50" title="Excluir nota">
                     <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
@@ -328,6 +442,9 @@ export function Notes() {
               {otherNotes.map(note => {
                 const author = note.author || { id: note.userId, displayName: 'Usuário' };
                 const timeAgo = formatDistanceToNow(new Date(note.createdAt), { addSuffix: true, locale: ptBR });
+                const noteReactions = note.reactions || getEmptyReactions();
+                const totalReactions = Object.values(noteReactions).reduce((sum, arr) => sum + arr.length, 0);
+
                 return (
                   <div
                     key={note.userId}
@@ -346,20 +463,25 @@ export function Notes() {
                       </Link>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <Link
-                            to={`/profile/${author.id}`}
-                            className="font-bold text-sm hover:text-primary transition-colors"
-                            onClick={e => e.stopPropagation()}
-                          >
+                          <Link to={`/profile/${author.id}`} className="font-bold text-sm hover:text-primary transition-colors" onClick={e => e.stopPropagation()}>
                             {author.displayName}
                           </Link>
                           <span className="text-muted-foreground text-xs">{timeAgo}</span>
                         </div>
                         <div className="flex items-center gap-2 mt-1.5">
                           {note.emoji && <span className="text-2xl">{note.emoji}</span>}
-                          {note.content && (
-                            <p className="text-foreground leading-relaxed">{note.content}</p>
-                          )}
+                          {note.content && <p className="text-foreground leading-relaxed">{note.content}</p>}
+                        </div>
+
+                        {/* Reaction bar */}
+                        <div onClick={e => e.stopPropagation()}>
+                          <ReactionBar
+                            noteOwnerId={note.userId}
+                            reactions={noteReactions}
+                            currentUserId={user?.id}
+                            onReact={(type, newReactions, myReaction) => handleReact(note.userId, type, newReactions, myReaction)}
+                            compact
+                          />
                         </div>
                       </div>
                     </div>
@@ -461,10 +583,7 @@ export function Notes() {
                 </button>
               )}
               <div className="flex gap-2 ml-auto">
-                <button
-                  onClick={() => setShowModal(false)}
-                  className="px-4 py-2 rounded-full border border-border hover:bg-muted transition-colors text-sm font-medium"
-                >
+                <button onClick={() => setShowModal(false)} className="px-4 py-2 rounded-full border border-border hover:bg-muted transition-colors text-sm font-medium">
                   Cancelar
                 </button>
                 <button
@@ -526,6 +645,18 @@ export function Notes() {
                 <p className="mt-4 text-foreground text-base leading-relaxed px-2">
                   {viewingNote.content}
                 </p>
+              )}
+
+              {/* Reactions in modal */}
+              {viewingNote.userId !== user?.id && (
+                <div className="mt-4 flex justify-center">
+                  <ReactionBar
+                    noteOwnerId={viewingNote.userId}
+                    reactions={viewingNote.reactions || getEmptyReactions()}
+                    currentUserId={user?.id}
+                    onReact={(type, newReactions, myReaction) => handleReact(viewingNote.userId, type, newReactions, myReaction)}
+                  />
+                </div>
               )}
 
               <button
