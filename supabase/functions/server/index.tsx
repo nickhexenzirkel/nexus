@@ -2,7 +2,7 @@ import { Hono } from "npm:hono";
 import { cors } from "npm:hono/cors";
 import { logger } from "npm:hono/logger";
 import { createClient } from "npm:@supabase/supabase-js@2";
-import * as kv from "./kv_store.tsx";
+import * as kv from "./kv_store.ts";
 
 const app = new Hono();
 
@@ -1894,6 +1894,71 @@ app.get("/make-server-e9524f09/posts/user/:userId/likes", async (c) => {
   } catch (error) {
     console.error(`Error getting user liked posts: ${error}`);
     return c.json({ error: 'Internal server error' }, 500);
+  }
+});
+
+// ============ CLEANUP ENDPOINT ============
+// Deletes posts older than 3 days — chamado pelo cron job do Supabase
+
+app.post("/make-server-e9524f09/cleanup-old-posts", async (c) => {
+  try {
+    const THREE_DAYS = 3 * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+
+    // Busca todos os posts no KV store
+    const { data: rows, error } = await supabaseAdmin
+      .from("kv_store_e9524f09")
+      .select("key, value")
+      .like("key", "post:%");
+
+    if (error) {
+      console.error(`Error fetching posts for cleanup: ${error.message}`);
+      return c.json({ error: error.message }, 500);
+    }
+
+    const toDelete: string[] = [];
+
+    for (const row of rows ?? []) {
+      const createdAt = row.value?.createdAt;
+      if (createdAt && now - new Date(createdAt).getTime() > THREE_DAYS) {
+        toDelete.push(row.key);
+      }
+    }
+
+    if (toDelete.length > 0) {
+      // Remove do global_feed
+      const globalFeed: string[] = await kv.get('global_feed') || [];
+      const deletedPostIds = toDelete.map((k: string) => k.replace('post:', ''));
+      const newFeed = globalFeed.filter((id: string) => !deletedPostIds.includes(id));
+      await kv.set('global_feed', newFeed);
+
+      // Remove imagens do storage se existirem
+      const bucketName = 'make-e9524f09-nexus-media';
+      for (const row of rows ?? []) {
+        if (!toDelete.includes(row.key)) continue;
+        const mediaUrls: string[] = row.value?.mediaUrls || [];
+        for (const url of mediaUrls) {
+          try {
+            const path = url.split(`${bucketName}/`)[1];
+            if (path) await supabaseAdmin.storage.from(bucketName).remove([path]);
+          } catch (e) {
+            console.error(`Failed to delete media: ${e}`);
+          }
+        }
+      }
+
+      // Deleta os posts do KV store
+      await supabaseAdmin
+        .from("kv_store_e9524f09")
+        .delete()
+        .in("key", toDelete);
+    }
+
+    console.log(`Cleanup: deleted ${toDelete.length} posts older than 3 days`);
+    return c.json({ success: true, deleted: toDelete.length });
+  } catch (error) {
+    console.error(`Error during cleanup: ${error}`);
+    return c.json({ error: 'Internal server error during cleanup' }, 500);
   }
 });
 
