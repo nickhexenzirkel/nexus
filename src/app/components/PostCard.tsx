@@ -335,7 +335,7 @@ function CommentItem({
             {comment.mediaUrls && comment.mediaUrls.length > 0 && (
               <div className="mt-2 rounded-xl overflow-hidden">
                 {comment.mediaType === 'video' ? (
-                  <video src={comment.mediaUrls[0]} controls className="w-full rounded-xl" style={{ maxHeight: 400 }} />
+                  <AutoplayVideo src={comment.mediaUrls[0]} maxHeight={400} />
                 ) : (
                   <img
                     src={comment.mediaUrls[0]}
@@ -402,7 +402,7 @@ function CommentItem({
                     {reply.mediaUrls && reply.mediaUrls.length > 0 && (
                       <div className="mt-1.5 rounded-xl overflow-hidden">
                         {reply.mediaType === 'video' ? (
-                          <video src={reply.mediaUrls[0]} controls className="w-full rounded-xl" style={{ maxHeight: 360 }} />
+                          <AutoplayVideo src={reply.mediaUrls[0]} maxHeight={360} />
                         ) : (
                           <img src={reply.mediaUrls[0]} alt="Mídia" className="w-full object-cover rounded-xl max-h-64" />
                         )}
