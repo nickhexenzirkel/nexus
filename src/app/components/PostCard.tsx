@@ -282,7 +282,6 @@ function CommentItem({
   const [deletingComment, setDeletingComment] = useState<string | null>(null);
 
   const handleDeleteComment = async (commentId: string) => {
-    if (!confirm('Excluir este comentário?')) return;
     setDeletingComment(commentId);
     try {
       const authHeaders = await getAuthHeaders();
@@ -450,6 +449,7 @@ export function PostCard({ post, onDelete, onLike, isQuotedPreview = false }: Po
   const [likesCount, setLikesCount] = useState(displayPost.likes?.length || 0);
   const [repostsCount, setRepostsCount] = useState(displayPost.reposts?.length || 0);
   const [deleting, setDeleting] = useState(false);
+  const [confirmModal, setConfirmModal] = useState<{ message: string; onConfirm: () => void } | null>(null);
   const [reposting, setReposting] = useState(false);
   const [reposted, setReposted] = useState(false);
   const [poll, setPoll] = useState<Poll | null>(displayPost.poll || null);
@@ -512,10 +512,13 @@ export function PostCard({ post, onDelete, onLike, isQuotedPreview = false }: Po
     }
   };
 
-  const handleDelete = async () => {
+  const handleDelete = () => {
     if (!user || displayPost.userId !== user.id) return;
-    if (!confirm('Tem certeza que deseja deletar este post?')) return;
-    setDeleting(true);
+    setConfirmModal({
+      message: 'Tem certeza que deseja deletar este post?',
+      onConfirm: async () => {
+        setConfirmModal(null);
+        setDeleting(true);
     try {
       const authHeaders = await getAuthHeaders();
       const response = await fetch(
@@ -530,6 +533,8 @@ export function PostCard({ post, onDelete, onLike, isQuotedPreview = false }: Po
     } finally {
       setDeleting(false);
     }
+      }
+    });
   };
 
   const handleRepost = async () => {
@@ -998,6 +1003,29 @@ export function PostCard({ post, onDelete, onLike, isQuotedPreview = false }: Po
             <X className="w-6 h-6 text-white" />
           </button>
           <img src={lightboxUrl} alt="Imagem ampliada" className="max-w-full max-h-[90vh] object-contain rounded-xl shadow-2xl" onClick={(e) => e.stopPropagation()} />
+        </div>
+      )}
+
+      {/* Confirm Modal */}
+      {confirmModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-card border border-border rounded-2xl shadow-2xl p-6 max-w-sm w-full">
+            <p className="text-foreground font-medium text-center mb-6">{confirmModal.message}</p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setConfirmModal(null)}
+                className="flex-1 px-4 py-2 rounded-xl border border-border hover:bg-muted transition-colors text-sm font-medium"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={confirmModal.onConfirm}
+                className="flex-1 px-4 py-2 rounded-xl bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors text-sm font-medium"
+              >
+                Deletar
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
