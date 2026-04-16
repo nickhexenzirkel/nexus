@@ -124,9 +124,58 @@ app.get("/make-server-e9524f09/health", (c) => {
 });
 
 // Seed initial users endpoint (for development)
+//
+// Validates each entry (name must split into first + last, CPF must be exactly
+// 11 digits) before attempting creation, returns structured error responses,
+// and uses outcome-aware HTTP status codes:
+//   200  — all entries created or already existed
+//   207  — partial success (at least one error during creation)
+//   400  — request body was not valid JSON, or supplied `users` failed validation
+//   401  — SEED_SECRET is configured but the caller did not provide a matching one
+//   500  — all creation attempts failed, or an unexpected exception bubbled up
+//   502  — upstream Supabase call (listUsers) failed before any seeding could run
 app.post("/make-server-e9524f09/seed-users", async (c) => {
   try {
-    const seedUsers = [
+    // Optional shared-secret gate. If SEED_SECRET is set in the environment we
+    // require callers to send a matching X-Seed-Secret header; otherwise the
+    // endpoint stays open (backwards compatible with existing dev workflows).
+    const seedSecret = Deno.env.get('SEED_SECRET');
+    if (seedSecret) {
+      const provided = c.req.header('X-Seed-Secret');
+      if (!provided || provided !== seedSecret) {
+        return c.json({ error: 'Unauthorized' }, 401);
+      }
+    }
+
+    // Accept an optional JSON body of the form { users: [{ name, cpf }, ...] }
+    // to let callers seed additional accounts. Anything else in the body is
+    // ignored. An empty body is fine — only reject bodies that claim to be
+    // JSON but fail to parse.
+    let customUsers: unknown[] = [];
+    const contentLength = c.req.header('content-length');
+    const contentType = c.req.header('content-type') || '';
+    const hasBody = contentLength !== undefined && contentLength !== '0';
+    if (hasBody && contentType.toLowerCase().includes('application/json')) {
+      let body: any;
+      try {
+        body = await c.req.json();
+      } catch {
+        return c.json({ error: 'Invalid JSON body' }, 400);
+      }
+      if (body !== null && body !== undefined) {
+        if (typeof body !== 'object' || Array.isArray(body)) {
+          return c.json({ error: 'Request body must be a JSON object' }, 400);
+        }
+        if (body.users !== undefined) {
+          if (!Array.isArray(body.users)) {
+            return c.json({ error: '"users" must be an array of { name, cpf }' }, 400);
+          }
+          customUsers = body.users;
+        }
+      }
+    }
+
+    const defaultSeedUsers = [
       { name: "Victor Altiery Vieira Barros", cpf: "06446653352" },
       { name: "Luís Felipe Ferreira Cavalcante", cpf: "09027334358" },
       { name: "Robson Kauã Linhares Gomes", cpf: "09538288327" },
@@ -160,81 +209,190 @@ app.post("/make-server-e9524f09/seed-users", async (c) => {
       // Legacy test users kept for compatibility
       { name: "João Silva", cpf: "12345678900" },
       { name: "Maria Santos", cpf: "98765432100" },
-      { name: "Marcos Mota", cpf: "01778594310"}
+      { name: "Marcos Mota", cpf: "01778594310" },
     ];
 
-    const results = [];
+    // Validate each entry. Defaults are trusted but still run through the same
+    // validator so a typo in the hardcoded list surfaces instead of creating
+    // malformed accounts. Custom (caller-supplied) entries that fail validation
+    // cause the whole request to be rejected with 400.
+    const cpfRegex = /^\d{11}$/;
+    type ValidSeedUser = { name: string; cpf: string; firstName: string; lastName: string };
+    type ValidationError = { index: number; name?: string; cpf?: string; reason: string; source: 'default' | 'custom' };
 
-    // Fetch existing users ONCE to avoid calling listUsers() 32 times
-    let existingEmails = new Set<string>();
-    try {
-      const { data: existingUsers } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 });
-      existingEmails = new Set(existingUsers.users.map((u: any) => u.email));
-    } catch (listError) {
-      console.error(`Error fetching existing users list: ${listError}`);
+    const validSeedUsers: ValidSeedUser[] = [];
+    const validationErrors: ValidationError[] = [];
+
+    const validate = (raw: unknown, index: number, source: 'default' | 'custom'): ValidSeedUser | null => {
+      if (!raw || typeof raw !== 'object') {
+        validationErrors.push({ index, source, reason: 'Entry must be an object with { name, cpf }' });
+        return null;
+      }
+      const entry = raw as { name?: unknown; cpf?: unknown };
+      if (typeof entry.name !== 'string' || !entry.name.trim()) {
+        validationErrors.push({ index, source, reason: 'name is required and must be a non-empty string' });
+        return null;
+      }
+      if (typeof entry.cpf !== 'string' || !cpfRegex.test(entry.cpf)) {
+        validationErrors.push({ index, source, name: entry.name, cpf: typeof entry.cpf === 'string' ? entry.cpf : undefined, reason: 'cpf must be exactly 11 digits' });
+        return null;
+      }
+      const name = entry.name.trim();
+      const nameParts = name.split(/\s+/);
+      if (nameParts.length < 2) {
+        validationErrors.push({ index, source, name, cpf: entry.cpf, reason: 'name must include both a first and last name' });
+        return null;
+      }
+      return {
+        name,
+        cpf: entry.cpf,
+        firstName: nameParts[0],
+        lastName: nameParts.slice(1).join(' '),
+      };
+    };
+
+    defaultSeedUsers.forEach((u, i) => {
+      const v = validate(u, i, 'default');
+      if (v) validSeedUsers.push(v);
+    });
+
+    const customErrorCountBefore = validationErrors.filter(e => e.source === 'custom').length;
+    customUsers.forEach((u, i) => {
+      const v = validate(u, i, 'custom');
+      if (v) validSeedUsers.push(v);
+    });
+    const customErrorCountAfter = validationErrors.filter(e => e.source === 'custom').length;
+
+    if (customErrorCountAfter > customErrorCountBefore) {
+      return c.json({
+        error: 'Invalid users payload',
+        validationErrors: validationErrors.filter(e => e.source === 'custom'),
+      }, 400);
     }
 
-    for (const seedUser of seedUsers) {
-      const nameParts = seedUser.name.trim().split(' ');
-      const firstName = nameParts[0];
-      const lastName = nameParts.slice(1).join(' ');
+    // Fetch existing users ONCE so we don't call listUsers() per entry. If this
+    // fails we can't reliably skip duplicates, so bail out with 502 instead of
+    // silently charging ahead and creating duplicate-email errors for every
+    // entry.
+    let existingEmails = new Set<string>();
+    try {
+      const { data: existingUsers, error: listError } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 });
+      if (listError) throw listError;
+      existingEmails = new Set((existingUsers?.users ?? []).map((u: any) => u.email).filter(Boolean));
+    } catch (listError) {
+      console.error(`Error fetching existing users list: ${listError}`);
+      const message = listError instanceof Error ? listError.message : 'Failed to fetch existing users';
+      return c.json({ error: `Upstream error listing users: ${message}` }, 502);
+    }
+
+    type SeedResult = {
+      name: string;
+      email: string;
+      status: 'created' | 'already_exists' | 'error';
+      userId?: string;
+      error?: string;
+    };
+    const results: SeedResult[] = [];
+    let createdCount = 0;
+    let errorCount = 0;
+    let alreadyExistsCount = 0;
+
+    for (const seedUser of validSeedUsers) {
+      const { firstName, lastName, cpf, name } = seedUser;
       const email = generateEmail(firstName, lastName);
-      const password = seedUser.cpf;
+      const password = cpf;
 
-      console.log(`Processing user: ${seedUser.name}, email: ${email}`);
+      console.log(`Processing user: ${name}, email: ${email}`);
 
-      // Check against the cached list
       if (existingEmails.has(email)) {
         console.log(`User ${email} already exists, skipping.`);
-        results.push({ name: seedUser.name, status: 'already_exists', email });
+        results.push({ name, status: 'already_exists', email });
+        alreadyExistsCount++;
         continue;
       }
 
-      // Create user with Supabase Auth
       const { data, error } = await supabaseAdmin.auth.admin.createUser({
         email,
         password,
-        user_metadata: { 
+        user_metadata: {
           firstName,
           lastName,
-          cpf: seedUser.cpf,
-          displayName: seedUser.name,
+          cpf,
+          displayName: name,
         },
-        email_confirm: true
+        email_confirm: true,
       });
 
       if (error) {
-        console.error(`Error creating user ${seedUser.name}: ${error.message}`);
-        results.push({ name: seedUser.name, status: 'error', error: error.message, email });
+        console.error(`Error creating user ${name}: ${error.message}`);
+        results.push({ name, status: 'error', error: error.message, email });
+        errorCount++;
         continue;
       }
 
-      console.log(`Successfully created user ${seedUser.name} with ID: ${data.user.id}`);
+      console.log(`Successfully created user ${name} with ID: ${data.user.id}`);
 
-      // Create user profile in KV store
       await kv.set(`user:${data.user.id}`, {
         id: data.user.id,
         firstName,
         lastName,
-        cpf: seedUser.cpf,
-        displayName: seedUser.name,
+        cpf,
+        displayName: name,
         bio: '',
         avatar: '',
         banner: '',
         createdAt: new Date().toISOString(),
       });
 
-      results.push({ name: seedUser.name, status: 'created', userId: data.user.id, email });
+      // Track locally so duplicate entries within this request don't retry.
+      existingEmails.add(email);
+      results.push({ name, status: 'created', userId: data.user.id, email });
+      createdCount++;
     }
 
-    return c.json({ 
+    const summary = {
+      total: validSeedUsers.length,
+      created: createdCount,
+      alreadyExists: alreadyExistsCount,
+      errors: errorCount,
+      invalid: validationErrors.length,
+    };
+
+    // All creation attempts failed — surface as 500 so callers don't treat it
+    // as a successful seed.
+    const attempted = createdCount + errorCount;
+    if (attempted > 0 && createdCount === 0) {
+      return c.json({
+        success: false,
+        message: 'All user creations failed',
+        summary,
+        results,
+        validationErrors,
+      }, 500);
+    }
+
+    // Some entries failed — 207 Multi-Status signals partial success.
+    if (errorCount > 0) {
+      return c.json({
+        success: true,
+        message: 'Seed completed with errors',
+        summary,
+        results,
+        validationErrors,
+      }, 207);
+    }
+
+    return c.json({
       success: true,
       message: 'Seed completed',
-      results 
-    });
+      summary,
+      results,
+      validationErrors,
+    }, 200);
   } catch (error) {
     console.error(`Unexpected error during seeding: ${error}`);
-    return c.json({ error: 'Internal server error during seeding' }, 500);
+    const message = error instanceof Error ? error.message : 'Internal server error during seeding';
+    return c.json({ error: message }, 500);
   }
 });
 
