@@ -63,9 +63,9 @@ function verifyUserToken(token: string | undefined): { id: string } | null {
  * so the Supabase gateway never rejects it). Fall back to the Authorization Bearer
  * token for backwards compatibility.
  */
-function getUserToken(c: any): string | undefined {
-  return c.req.header('X-User-Token') || c.req.header('Authorization')?.split(' ')[1];
-}
+//function getUserToken(c: any): string | undefined {
+  //return c.req.header('X-User-Token') || c.req.header('Authorization')?.split(' ')[1];
+//}
 
 // Enable logger
 app.use('*', logger(console.log));
