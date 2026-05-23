@@ -7,7 +7,7 @@
       "source": "/(.*)",
       "headers": [
         { "key": "X-Frame-Options", "value": "ALLOWALL" },
-        { "key": "Content-Security-Policy", "value": "frame-ancestors *" }
+        { "key": "Content-Security-Policy", "value": "frame-ancestors https://nexus-git-main-nickhexenzirkels-projects.vercel.app/" }
       ]
     }
   ]

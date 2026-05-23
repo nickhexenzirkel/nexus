@@ -57,6 +57,24 @@ function verifyUserToken(token: string | undefined): { id: string } | null {
   }
 }
 
+const nextConfig = {
+  async headers() {
+    return [
+      {
+        source: '/(.*)',
+        headers: [
+          {
+            key: 'Content-Security-Policy',
+            value: "frame-ancestors https://nexus-git-main-nickhexenzirkels-projects.vercel.app/", // Substitua * pelo domínio específico (ex: https://seu-site.com) se quiser maior segurança
+          },
+        ],
+      },
+    ];
+  },
+};
+
+export default nextConfig;
+
 /**
  * Extract the user JWT from the request.
  * Prefer the X-User-Token header (sent alongside the anon-key Authorization header
