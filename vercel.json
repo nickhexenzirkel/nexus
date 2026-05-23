@@ -1,13 +1,19 @@
 {
-  "headers": [
+  "routes": [
     {
-      "source": "/(.*)",
-      "headers": [
-        {
-          "key": "Content-Security-Policy",
-          "value": "frame-ancestors *"
-        }
-      ]
+      "src": "/(.*)",
+      "headers": {
+        "X-Frame-Options": "ALLOWALL",
+        "Content-Security-Policy": "frame-ancestors *"
+      },
+      "continue": true
+    },
+    {
+      "handle": "filesystem"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/index.html"
     }
   ]
 }
